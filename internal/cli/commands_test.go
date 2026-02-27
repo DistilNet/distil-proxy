@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,6 +142,62 @@ func TestUninstallRemovesRuntimeDir(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.RootDir); !os.IsNotExist(err) {
 		t.Fatalf("expected runtime dir removed, err=%v", err)
+	}
+}
+
+func TestServiceCommands(t *testing.T) {
+	home := t.TempDir()
+	var installedHome string
+	var removedHome string
+
+	origInstall := installServiceFunc
+	origRemove := removeServiceFunc
+	t.Cleanup(func() {
+		installServiceFunc = origInstall
+		removeServiceFunc = origRemove
+	})
+
+	installServiceFunc = func(targetHome string) error {
+		installedHome = targetHome
+		return nil
+	}
+	removeServiceFunc = func(targetHome string) error {
+		removedHome = targetHome
+		return nil
+	}
+
+	out, err := runCLI(t, home, "service", "install")
+	if err != nil {
+		t.Fatalf("service install command error: %v", err)
+	}
+	if !strings.Contains(out, "service installed") {
+		t.Fatalf("unexpected service install output: %q", out)
+	}
+	if installedHome != home {
+		t.Fatalf("expected install to target home %q, got %q", home, installedHome)
+	}
+
+	out, err = runCLI(t, home, "service", "uninstall")
+	if err != nil {
+		t.Fatalf("service uninstall command error: %v", err)
+	}
+	if !strings.Contains(out, "service removed") {
+		t.Fatalf("unexpected service uninstall output: %q", out)
+	}
+	if removedHome != home {
+		t.Fatalf("expected uninstall to target home %q, got %q", home, removedHome)
+	}
+}
+
+func TestServiceInstallCommandError(t *testing.T) {
+	home := t.TempDir()
+	origInstall := installServiceFunc
+	t.Cleanup(func() { installServiceFunc = origInstall })
+
+	installServiceFunc = func(string) error { return errors.New("boom") }
+	_, err := runCLI(t, home, "service", "install")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected service install error, got %v", err)
 	}
 }
 

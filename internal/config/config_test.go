@@ -25,6 +25,9 @@ func TestDefaultPaths(t *testing.T) {
 	if paths.StatusFile != filepath.Join(home, DirName, StatusFileName) {
 		t.Fatalf("unexpected status file: %s", paths.StatusFile)
 	}
+	if paths.UpgradeStateFile != filepath.Join(home, DirName, UpgradeStateFileName) {
+		t.Fatalf("unexpected upgrade state file: %s", paths.UpgradeStateFile)
+	}
 }
 
 func TestConfigApplyDefaults(t *testing.T) {
@@ -40,6 +43,12 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Fatalf("expected default log level, got %q", cfg.LogLevel)
 	}
+	if !cfg.AutoUpgrade {
+		t.Fatal("expected auto upgrade enabled by default")
+	}
+	if cfg.UpgradeCheckHours != DefaultUpgradeCheckHours {
+		t.Fatalf("expected default upgrade interval %d, got %d", DefaultUpgradeCheckHours, cfg.UpgradeCheckHours)
+	}
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -51,39 +60,43 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid",
 			cfg: Config{
-				APIKey:    "dk_abc123",
-				Server:    DefaultServerURL,
-				TimeoutMS: 1000,
-				LogLevel:  "info",
+				APIKey:            "dk_abc123",
+				Server:            DefaultServerURL,
+				TimeoutMS:         1000,
+				LogLevel:          "info",
+				UpgradeCheckHours: 6,
 			},
 			wantErr: false,
 		},
 		{
 			name: "invalid key prefix",
 			cfg: Config{
-				APIKey:    "dpk_abc123",
-				Server:    DefaultServerURL,
-				TimeoutMS: 1000,
-				LogLevel:  "info",
+				APIKey:            "dpk_abc123",
+				Server:            DefaultServerURL,
+				TimeoutMS:         1000,
+				LogLevel:          "info",
+				UpgradeCheckHours: 6,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing server",
 			cfg: Config{
-				APIKey:    "dk_abc123",
-				TimeoutMS: 1000,
-				LogLevel:  "info",
+				APIKey:            "dk_abc123",
+				TimeoutMS:         1000,
+				LogLevel:          "info",
+				UpgradeCheckHours: 6,
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid timeout",
 			cfg: Config{
-				APIKey:    "dk_abc123",
-				Server:    DefaultServerURL,
-				TimeoutMS: 0,
-				LogLevel:  "info",
+				APIKey:            "dk_abc123",
+				Server:            DefaultServerURL,
+				TimeoutMS:         0,
+				LogLevel:          "info",
+				UpgradeCheckHours: 6,
 			},
 			wantErr: true,
 		},
@@ -127,6 +140,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.LogLevel != DefaultLogLevel {
 		t.Fatalf("expected default log level %q, got %q", DefaultLogLevel, loaded.LogLevel)
+	}
+	if !loaded.AutoUpgrade {
+		t.Fatal("expected auto upgrade enabled")
 	}
 
 	if runtime.GOOS != "windows" {
@@ -243,10 +259,11 @@ func TestValidateAPIKey(t *testing.T) {
 
 func TestConfigValidateMissingLogLevel(t *testing.T) {
 	cfg := Config{
-		APIKey:    "dk_test",
-		Server:    DefaultServerURL,
-		TimeoutMS: 1000,
-		LogLevel:  "",
+		APIKey:            "dk_test",
+		Server:            DefaultServerURL,
+		TimeoutMS:         1000,
+		LogLevel:          "",
+		UpgradeCheckHours: 6,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error")
@@ -326,6 +343,26 @@ func TestSaveClearsLegacyProxyKey(t *testing.T) {
 	}
 	if strings.Contains(string(content), "proxy_key") {
 		t.Fatalf("expected proxy_key omitted, got %s", string(content))
+	}
+}
+
+func TestLoadPreservesExplicitAutoUpgradeFalse(t *testing.T) {
+	home := t.TempDir()
+	paths := DefaultPaths(home)
+	if err := EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure state dirs: %v", err)
+	}
+	payload := []byte(`{"api_key":"dk_test","server":"wss://proxy.distil.net/ws","timeout_ms":30000,"log_level":"info","auto_upgrade":false,"upgrade_check_hours":6}`)
+	if err := os.WriteFile(paths.ConfigFile, payload, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.AutoUpgrade {
+		t.Fatal("expected auto_upgrade=false from config file")
 	}
 }
 

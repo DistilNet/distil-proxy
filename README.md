@@ -8,6 +8,7 @@ Public Go daemon for Distil proxy routing.
 
 - `dk_` API key based auth (single credential model)
 - daemon lifecycle commands: `start`, `stop`, `restart`, `status`, `uninstall`
+- service manager helpers: `service install`, `service uninstall`
 - foreground mode for service managers: `start --foreground`
 - bounded fetch execution with timeout + max response size guardrails
 - websocket heartbeat and reconnect backoff
@@ -29,6 +30,7 @@ distil-proxy auth dk_your_api_key
 distil-proxy start
 distil-proxy status
 distil-proxy logs -n 50
+distil-proxy service install
 distil-proxy stop
 ```
 
@@ -41,7 +43,14 @@ distil-proxy stop
   logs/daemon.log
   distil-proxy.pid
   status.json
+  upgrade.json
 ```
+
+`config.json` keys:
+- `api_key` (required, `dk_` prefixed)
+- `server` (default `wss://proxy.distil.net/ws`)
+- `auto_upgrade` (default `true`)
+- `upgrade_check_hours` (default `6`)
 
 ## Build and Test
 

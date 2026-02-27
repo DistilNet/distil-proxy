@@ -19,38 +19,45 @@ var (
 )
 
 const (
-	DirName        = ".distil-proxy"
-	ConfigFileName = "config.json"
-	BinDirName     = "bin"
-	LogsDirName    = "logs"
-	LogFileName    = "daemon.log"
-	PIDFileName    = "distil-proxy.pid"
-	StatusFileName = "status.json"
+	DirName              = ".distil-proxy"
+	ConfigFileName       = "config.json"
+	BinDirName           = "bin"
+	LogsDirName          = "logs"
+	LogFileName          = "daemon.log"
+	PIDFileName          = "distil-proxy.pid"
+	StatusFileName       = "status.json"
+	UpgradeStateFileName = "upgrade.json"
 
-	DefaultServerURL = "wss://proxy.distil.net/ws"
-	DefaultTimeoutMS = 30000
-	DefaultLogLevel  = "info"
+	DefaultServerURL         = "wss://proxy.distil.net/ws"
+	DefaultTimeoutMS         = 30000
+	DefaultLogLevel          = "info"
+	DefaultUpgradeCheckHours = 6
 )
 
 // Config defines persisted daemon configuration.
 type Config struct {
-	APIKey         string `json:"api_key"`
-	LegacyProxyKey string `json:"proxy_key,omitempty"`
-	Server         string `json:"server,omitempty"`
-	TimeoutMS      int    `json:"timeout_ms,omitempty"`
-	LogLevel       string `json:"log_level,omitempty"`
+	APIKey            string `json:"api_key"`
+	LegacyProxyKey    string `json:"proxy_key,omitempty"`
+	Server            string `json:"server,omitempty"`
+	TimeoutMS         int    `json:"timeout_ms,omitempty"`
+	LogLevel          string `json:"log_level,omitempty"`
+	AutoUpgrade       bool   `json:"auto_upgrade"`
+	UpgradeCheckHours int    `json:"upgrade_check_hours,omitempty"`
+
+	autoUpgradeSet bool `json:"-"`
 }
 
 // Paths stores resolved runtime/config file locations.
 type Paths struct {
-	HomeDir    string
-	RootDir    string
-	ConfigFile string
-	BinDir     string
-	LogsDir    string
-	LogFile    string
-	PIDFile    string
-	StatusFile string
+	HomeDir          string
+	RootDir          string
+	ConfigFile       string
+	BinDir           string
+	LogsDir          string
+	LogFile          string
+	PIDFile          string
+	StatusFile       string
+	UpgradeStateFile string
 }
 
 // ErrConfigNotFound indicates config file is not present yet.
@@ -61,14 +68,15 @@ func DefaultPaths(homeDir string) Paths {
 	rootDir := filepath.Join(homeDir, DirName)
 
 	return Paths{
-		HomeDir:    homeDir,
-		RootDir:    rootDir,
-		ConfigFile: filepath.Join(rootDir, ConfigFileName),
-		BinDir:     filepath.Join(rootDir, BinDirName),
-		LogsDir:    filepath.Join(rootDir, LogsDirName),
-		LogFile:    filepath.Join(rootDir, LogsDirName, LogFileName),
-		PIDFile:    filepath.Join(rootDir, PIDFileName),
-		StatusFile: filepath.Join(rootDir, StatusFileName),
+		HomeDir:          homeDir,
+		RootDir:          rootDir,
+		ConfigFile:       filepath.Join(rootDir, ConfigFileName),
+		BinDir:           filepath.Join(rootDir, BinDirName),
+		LogsDir:          filepath.Join(rootDir, LogsDirName),
+		LogFile:          filepath.Join(rootDir, LogsDirName, LogFileName),
+		PIDFile:          filepath.Join(rootDir, PIDFileName),
+		StatusFile:       filepath.Join(rootDir, StatusFileName),
+		UpgradeStateFile: filepath.Join(rootDir, UpgradeStateFileName),
 	}
 }
 
@@ -93,6 +101,12 @@ func (c *Config) ApplyDefaults() {
 	if strings.TrimSpace(c.LogLevel) == "" {
 		c.LogLevel = DefaultLogLevel
 	}
+	if !c.autoUpgradeSet {
+		c.AutoUpgrade = true
+	}
+	if c.UpgradeCheckHours <= 0 {
+		c.UpgradeCheckHours = DefaultUpgradeCheckHours
+	}
 }
 
 // Validate enforces required values and simple semantic constraints.
@@ -111,6 +125,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.LogLevel) == "" {
 		return errors.New("log_level is required")
+	}
+	if c.UpgradeCheckHours <= 0 {
+		return errors.New("upgrade_check_hours must be > 0")
 	}
 
 	return nil
@@ -147,6 +164,13 @@ func Load(paths Paths) (Config, error) {
 	}
 
 	var cfg Config
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if _, ok := raw["auto_upgrade"]; ok {
+		cfg.autoUpgradeSet = true
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {

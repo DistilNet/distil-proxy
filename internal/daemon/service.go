@@ -12,12 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/exec-io/distil-proxy/internal/config"
 	"github.com/exec-io/distil-proxy/internal/fetch"
 	"github.com/exec-io/distil-proxy/internal/observability"
+	"github.com/exec-io/distil-proxy/internal/upgrade"
+	"github.com/exec-io/distil-proxy/internal/version"
 	"github.com/exec-io/distil-proxy/internal/ws"
 )
 
@@ -34,6 +37,7 @@ var (
 	killFunc      = syscall.Kill
 	readAllFunc   = io.ReadAll
 	marshalStatus = json.MarshalIndent
+	exitFunc      = os.Exit
 )
 
 type wsRunner interface {
@@ -195,6 +199,21 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 		}
 	}
 
+	upgrader := newUpgradeManager(paths, cfg)
+	if upgrader != nil {
+		rolledBack, err := upgrader.HandleStartup()
+		if err != nil {
+			updateStatus(func(s *RuntimeStatus) {
+				s.LastError = fmt.Sprintf("auto-upgrade startup check failed: %v", err)
+			})
+		} else if rolledBack {
+			updateStatus(func(s *RuntimeStatus) {
+				s.WSState = "restarting"
+			})
+			return restartProcess()
+		}
+	}
+
 	client, err := clientFactory(ws.ClientConfig{
 		ServerURL:        cfg.Server,
 		APIKey:           cfg.APIKey,
@@ -247,7 +266,44 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 		}
 	}()
 
-	runErr := runClientWithRecovery(ctx, client)
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	var upgradeRequested atomic.Bool
+	if upgrader != nil {
+		go func() {
+			upgradeTicker := time.NewTicker(upgrader.CheckInterval())
+			defer upgradeTicker.Stop()
+
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-upgradeTicker.C:
+					result, err := upgrader.CheckAndUpgrade(runCtx)
+					if err != nil {
+						updateStatus(func(s *RuntimeStatus) {
+							s.LastError = fmt.Sprintf("auto-upgrade check failed: %v", err)
+						})
+						continue
+					}
+					if result.Applied {
+						updateStatus(func(s *RuntimeStatus) {
+							s.WSState = "restarting"
+						})
+						upgradeRequested.Store(true)
+						runCancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	runErr := runClientWithRecovery(runCtx, client)
+	if upgradeRequested.Load() {
+		return restartProcess()
+	}
 	if runErr != nil {
 		updateStatus(func(s *RuntimeStatus) {
 			s.LastError = runErr.Error()
@@ -283,6 +339,52 @@ func runClientWithRecovery(ctx context.Context, client wsRunner) (err error) {
 		}
 	}()
 	return client.Run(ctx)
+}
+
+func newUpgradeManager(paths config.Paths, cfg config.Config) *upgrade.Manager {
+	if !cfg.AutoUpgrade {
+		return nil
+	}
+
+	execPath, err := execPathFunc()
+	if err != nil {
+		return nil
+	}
+
+	checkInterval := time.Duration(cfg.UpgradeCheckHours) * time.Hour
+	if checkInterval <= 0 {
+		checkInterval = time.Duration(config.DefaultUpgradeCheckHours) * time.Hour
+	}
+
+	return upgrade.NewManager(upgrade.ManagerConfig{
+		Enabled:        cfg.AutoUpgrade,
+		APIKey:         cfg.APIKey,
+		CurrentVersion: version.DefaultInfo().Version,
+		BinaryPath:     execPath,
+		TempBinaryPath: execPath + ".new",
+		BackupPath:     execPath + ".bak",
+		StatePath:      paths.UpgradeStateFile,
+		CheckInterval:  checkInterval,
+	})
+}
+
+func restartProcess() error {
+	execPath, err := execPathFunc()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	cmd := execCmdFunc(execPath, os.Args[1:]...)
+	cmd.Env = os.Environ()
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("restart process: %w", err)
+	}
+	exitFunc(0)
+	return nil
 }
 
 // Stop signals the daemon process and waits for termination.
