@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -232,10 +233,23 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 	}
 	defer c.cfg.JobRegistry.Finish(req.ID)
 
+	requestBody, err := decodeRequestBody(req.BodyBase64)
+	if err != nil {
+		_ = c.writeJSON(ctx, conn, FetchError{
+			Type:    "fetch_error",
+			ID:      req.ID,
+			Error:   "invalid_request_body",
+			Message: "request body encoding is invalid",
+		})
+		c.emitJobResult(false, 0)
+		return nil
+	}
+
 	res, err := c.cfg.Fetcher.Fetch(fetchCtx, fetch.Request{
 		URL:       req.URL,
 		Method:    req.Method,
 		Headers:   req.Headers,
+		Body:      requestBody,
 		TimeoutMS: timeoutMS,
 	})
 	if err != nil {
@@ -263,6 +277,20 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 
 	c.emitJobResult(true, res.ElapsedMS)
 	return nil
+}
+
+func decodeRequestBody(encoded string) ([]byte, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	body, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return nil, nil
+	}
+	return body, nil
 }
 
 func (c *Client) writeJSON(ctx context.Context, conn *websocket.Conn, payload any) error {

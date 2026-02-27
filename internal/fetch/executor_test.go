@@ -58,6 +58,36 @@ func TestHTTPExecutorFetch(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorFetchSendsRequestBody(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if string(body) != "payload-body" {
+			t.Fatalf("expected payload-body, got %q", string(body))
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	executor := NewHTTPExecutor(1024)
+	res, err := executor.Fetch(context.Background(), Request{
+		URL:    ts.URL,
+		Method: http.MethodPost,
+		Body:   []byte("payload-body"),
+	})
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if res.Body != "ok" {
+		t.Fatalf("expected body ok, got %q", res.Body)
+	}
+}
+
 func TestHTTPExecutorFetchResponseTooLarge(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("0123456789"))

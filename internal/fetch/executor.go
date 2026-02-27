@@ -1,6 +1,7 @@
 package fetch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ type Request struct {
 	URL       string
 	Method    string
 	Headers   map[string]string
+	Body      []byte
 	TimeoutMS int
 }
 
@@ -63,7 +65,12 @@ func (e *HTTPExecutor) Fetch(ctx context.Context, req Request) (Result, error) {
 		method = http.MethodGet
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, req.URL, nil)
+	var bodyReader io.Reader
+	if len(req.Body) > 0 {
+		bodyReader = bytes.NewReader(req.Body)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, req.URL, bodyReader)
 	if err != nil {
 		return Result{}, fmt.Errorf("build request: %w", err)
 	}

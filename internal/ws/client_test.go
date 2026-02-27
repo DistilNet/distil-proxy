@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/base64"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -56,11 +57,12 @@ func TestClientRunHandlesFetchAndHeaders(t *testing.T) {
 		defer conn.Close(websocket.StatusNormalClosure, "done")
 
 		if err := wsjson.Write(r.Context(), conn, FetchRequest{
-			Type:      "fetch",
-			ID:        "job_1",
-			URL:       "https://example.com",
-			Method:    "GET",
-			TimeoutMS: 1000,
+			Type:       "fetch",
+			ID:         "job_1",
+			URL:        "https://example.com",
+			Method:     "GET",
+			BodyBase64: base64.StdEncoding.EncodeToString([]byte("payload")),
+			TimeoutMS:  1000,
 		}); err != nil {
 			t.Errorf("write fetch request: %v", err)
 			return
@@ -127,6 +129,12 @@ func TestClientRunHandlesFetchAndHeaders(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected fetch result")
+	}
+
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+	if string(fetcher.lastReq.Body) != "payload" {
+		t.Fatalf("expected forwarded body payload, got %q", string(fetcher.lastReq.Body))
 	}
 }
 

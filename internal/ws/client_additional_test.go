@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -316,6 +317,20 @@ func TestUtilityFunctions(t *testing.T) {
 	code, msg = mapFetchError(errors.New("x"), 123)
 	if code != "fetch_failed" || msg != "x" {
 		t.Fatalf("unexpected generic mapping: %s %s", code, msg)
+	}
+
+	body, err := decodeRequestBody(base64.StdEncoding.EncodeToString([]byte("abc")))
+	if err != nil || string(body) != "abc" {
+		t.Fatalf("expected decoded body abc, got body=%q err=%v", string(body), err)
+	}
+
+	body, err = decodeRequestBody("")
+	if err != nil || len(body) != 0 {
+		t.Fatalf("expected empty decoded body, got body=%q err=%v", string(body), err)
+	}
+
+	if _, err := decodeRequestBody("***"); err == nil {
+		t.Fatal("expected invalid body decode error")
 	}
 }
 
