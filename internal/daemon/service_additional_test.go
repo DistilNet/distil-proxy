@@ -695,6 +695,30 @@ func TestReadLogTailBranches(t *testing.T) {
 	}
 }
 
+func TestReadLogTailHandlesLongLines(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+
+	longLine := strings.Repeat("x", 32*1024)
+	content := longLine + "\nlast-line\n"
+	if err := os.WriteFile(paths.LogFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	lines, err := ReadLogTail(paths, 2)
+	if err != nil {
+		t.Fatalf("read tail with long lines: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %#v", lines)
+	}
+	if lines[0] != longLine || lines[1] != "last-line" {
+		t.Fatalf("unexpected tail lines: %#v", lines)
+	}
+}
+
 func TestWriteStatusAndPIDErrorPaths(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	if err := config.EnsureStateDirs(paths); err != nil {

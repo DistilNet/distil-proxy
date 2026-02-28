@@ -567,13 +567,26 @@ func ReadLogTail(paths config.Paths, n int) ([]string, error) {
 	lines := make([]string, n)
 	count := 0
 	reader := bufio.NewReader(f)
+	var lineBuilder strings.Builder
 	for {
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			lines[count%n] = strings.TrimRight(line, "\r\n")
+		chunk, isPrefix, err := reader.ReadLine()
+		if len(chunk) > 0 {
+			_, _ = lineBuilder.Write(chunk)
+		}
+		if err == nil && isPrefix {
+			continue
+		}
+		if err == nil {
+			lines[count%n] = lineBuilder.String()
 			count++
+			lineBuilder.Reset()
+			continue
 		}
 		if errors.Is(err, io.EOF) {
+			if lineBuilder.Len() > 0 {
+				lines[count%n] = lineBuilder.String()
+				count++
+			}
 			break
 		}
 		if err != nil {

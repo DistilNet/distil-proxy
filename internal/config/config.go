@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,14 @@ func Load(paths Paths) (Config, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return Config{}, fmt.Errorf("decode config: %w", err)
+		}
+	} else {
+		return Config{}, errors.New("decode config: trailing data after top-level object")
 	}
 
 	cfg.ApplyDefaults()

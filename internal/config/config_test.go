@@ -203,6 +203,28 @@ func TestLoadLegacyProxyKeyFails(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsTrailingTopLevelJSON(t *testing.T) {
+	home := t.TempDir()
+	paths := DefaultPaths(home)
+
+	if err := EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure state dirs: %v", err)
+	}
+
+	payload := []byte(`{"api_key":"dk_abc"}{"api_key":"dk_extra"}`)
+	if err := os.WriteFile(paths.ConfigFile, payload, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(paths)
+	if err == nil {
+		t.Fatal("expected decode error for trailing JSON")
+	}
+	if !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("expected trailing data error, got %v", err)
+	}
+}
+
 func TestDetectPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
