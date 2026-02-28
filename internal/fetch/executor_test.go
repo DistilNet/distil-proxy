@@ -56,6 +56,9 @@ func TestHTTPExecutorFetch(t *testing.T) {
 	if res.Headers["Content-Type"] != "text/plain" {
 		t.Fatalf("expected content-type text/plain, got %q", res.Headers["Content-Type"])
 	}
+	if res.FinalURL != ts.URL {
+		t.Fatalf("expected final URL %q, got %q", ts.URL, res.FinalURL)
+	}
 }
 
 func TestHTTPExecutorFetchSendsRequestBody(t *testing.T) {
@@ -177,5 +180,26 @@ func TestHTTPExecutorFetchDefaultsMethodAndNilClient(t *testing.T) {
 	}
 	if res.Body != "ok" {
 		t.Fatalf("expected body ok, got %q", res.Body)
+	}
+}
+
+func TestHTTPExecutorFetchTracksRedirectFinalURL(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer final.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	executor := NewHTTPExecutor(1024)
+	res, err := executor.Fetch(context.Background(), Request{URL: redirect.URL})
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if res.FinalURL != final.URL {
+		t.Fatalf("expected redirected final URL %q, got %q", final.URL, res.FinalURL)
 	}
 }

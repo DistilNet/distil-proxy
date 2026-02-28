@@ -270,6 +270,7 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 		Status:    res.Status,
 		Headers:   res.Headers,
 		Body:      res.Body,
+		FinalURL:  res.FinalURL,
 		ElapsedMS: res.ElapsedMS,
 	}); err != nil {
 		return fmt.Errorf("write fetch result: %w", err)

@@ -38,10 +38,18 @@ var (
 	readAllFunc   = io.ReadAll
 	marshalStatus = json.MarshalIndent
 	exitFunc      = os.Exit
+
+	upgradeManagerFactory = newUpgradeManager
 )
 
 type wsRunner interface {
 	Run(ctx context.Context) error
+}
+
+type upgradeManager interface {
+	HandleStartup() (bool, error)
+	CheckInterval() time.Duration
+	CheckAndUpgrade(ctx context.Context) (upgrade.CheckResult, error)
 }
 
 func newWSClient(cfg ws.ClientConfig) (wsRunner, error) {
@@ -199,7 +207,7 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 		}
 	}
 
-	upgrader := newUpgradeManager(paths, cfg)
+	upgrader := upgradeManagerFactory(paths, cfg)
 	if upgrader != nil {
 		rolledBack, err := upgrader.HandleStartup()
 		if err != nil {
@@ -341,7 +349,7 @@ func runClientWithRecovery(ctx context.Context, client wsRunner) (err error) {
 	return client.Run(ctx)
 }
 
-func newUpgradeManager(paths config.Paths, cfg config.Config) *upgrade.Manager {
+func newUpgradeManager(paths config.Paths, cfg config.Config) upgradeManager {
 	if !cfg.AutoUpgrade {
 		return nil
 	}

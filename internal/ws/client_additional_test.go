@@ -225,6 +225,62 @@ func TestHandleFetchMapsFetcherErrors(t *testing.T) {
 	}
 }
 
+func TestHandleFetchInvalidRequestBodyEncoding(t *testing.T) {
+	clientConn, serverConn := newWSPair(t)
+	c := &Client{
+		cfg: ClientConfig{
+			DefaultTimeoutMS: 250,
+			Fetcher:          staticFetcher{},
+			JobRegistry:      jobs.NewRegistry(),
+			Logger:           discardLogger(),
+		},
+	}
+
+	if err := c.handleFetch(context.Background(), clientConn, FetchRequest{
+		ID:         "job-invalid-body",
+		URL:        "https://example.com",
+		BodyBase64: "@@@not-base64@@@",
+	}); err != nil {
+		t.Fatalf("handle fetch: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var ferr FetchError
+	if err := wsjson.Read(ctx, serverConn, &ferr); err != nil {
+		t.Fatalf("read fetch error: %v", err)
+	}
+	if ferr.Error != "invalid_request_body" {
+		t.Fatalf("expected invalid_request_body, got %+v", ferr)
+	}
+}
+
+func TestHandleFetchWriteResultError(t *testing.T) {
+	clientConn, _ := newWSPair(t)
+	c := &Client{
+		cfg: ClientConfig{
+			DefaultTimeoutMS: 250,
+			Fetcher: staticFetcher{res: fetch.Result{
+				Status:    200,
+				Body:      "ok",
+				FinalURL:  "https://example.com/final",
+				ElapsedMS: 1,
+			}},
+			JobRegistry: jobs.NewRegistry(),
+			Logger:      discardLogger(),
+		},
+	}
+
+	_ = clientConn.Close(websocket.StatusNormalClosure, "close before write")
+	err := c.handleFetch(context.Background(), clientConn, FetchRequest{
+		ID:  "job-write-error",
+		URL: "https://example.com",
+	})
+	if err == nil || !strings.Contains(err.Error(), "write fetch result") {
+		t.Fatalf("expected write fetch result error, got %v", err)
+	}
+}
+
 func TestHeartbeatLoopSendsPing(t *testing.T) {
 	clientConn, serverConn := newWSPair(t)
 	c := &Client{

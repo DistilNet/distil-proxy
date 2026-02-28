@@ -31,6 +31,7 @@ func (s *stubFetcher) Fetch(_ context.Context, req fetch.Request) (fetch.Result,
 		Status:    http.StatusOK,
 		Headers:   map[string]string{"Content-Type": "text/plain"},
 		Body:      "ok",
+		FinalURL:  req.URL + "/final",
 		ElapsedMS: 12,
 	}, nil
 }
@@ -126,6 +127,9 @@ func TestClientRunHandlesFetchAndHeaders(t *testing.T) {
 		}
 		if res.Status != 200 || res.Body != "ok" {
 			t.Fatalf("unexpected result payload: %+v", res)
+		}
+		if res.FinalURL != "https://example.com/final" {
+			t.Fatalf("expected final_url to round-trip, got %q", res.FinalURL)
 		}
 	default:
 		t.Fatal("expected fetch result")

@@ -24,6 +24,7 @@ type FetchResult struct {
 	Status    int               `json:"status"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Body      string            `json:"body,omitempty"`
+	FinalURL  string            `json:"final_url,omitempty"`
 	ElapsedMS int64             `json:"elapsed_ms"`
 }
 

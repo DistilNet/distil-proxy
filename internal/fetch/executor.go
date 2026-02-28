@@ -33,6 +33,7 @@ type Result struct {
 	Status    int
 	Headers   map[string]string
 	Body      string
+	FinalURL  string
 	ElapsedMS int64
 }
 
@@ -108,11 +109,16 @@ func (e *HTTPExecutor) Fetch(ctx context.Context, req Request) (Result, error) {
 	for key, values := range resp.Header {
 		headers[key] = strings.Join(values, ",")
 	}
+	finalURL := req.URL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
 
 	return Result{
 		Status:    resp.StatusCode,
 		Headers:   headers,
 		Body:      string(body),
+		FinalURL:  finalURL,
 		ElapsedMS: time.Since(started).Milliseconds(),
 	}, nil
 }
