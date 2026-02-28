@@ -940,6 +940,64 @@ func TestStopTimeout(t *testing.T) {
 	}
 }
 
+func TestStopTreatsOwnershipChangeDuringWaitAsStopped(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, 4242); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	expectedName := filepath.Base(expectedPath)
+
+	origProcessName := processNameFn
+	ownershipChecks := 0
+	processNameFn = func(_ int) (string, error) {
+		ownershipChecks++
+		if ownershipChecks == 1 {
+			return expectedName, nil
+		}
+		return "pid-reused-by-other-process", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	origKill := killFunc
+	killCalls := 0
+	killFunc = func(_ int, sig syscall.Signal) error {
+		killCalls++
+		if sig == 0 || sig == syscall.SIGTERM {
+			return nil
+		}
+		t.Fatalf("unexpected signal in test: %v", sig)
+		return nil
+	}
+	defer func() { killFunc = origKill }()
+
+	origTimeout := stopTimeout
+	origPoll := stopPoll
+	stopTimeout = 5 * time.Second
+	stopPoll = 5 * time.Millisecond
+	defer func() {
+		stopTimeout = origTimeout
+		stopPoll = origPoll
+	}()
+
+	if err := Stop(paths); err != nil {
+		t.Fatalf("expected ownership change to be treated as stopped, got %v", err)
+	}
+	if killCalls < 2 {
+		t.Fatalf("expected process probe + SIGTERM calls, got %d", killCalls)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file removed, err=%v", statErr)
+	}
+}
+
 func TestStopRejectsPIDOwnershipMismatch(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	if err := config.EnsureStateDirs(paths); err != nil {

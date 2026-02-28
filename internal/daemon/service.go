@@ -331,7 +331,7 @@ func Stop(paths config.Paths) error {
 
 	deadline := time.Now().Add(stopTimeout)
 	for {
-		if !processRunning(pid) {
+		if !processRunning(pid) || !daemonOwnsPID(pid) {
 			if err := removePID(paths); err != nil {
 				return err
 			}
