@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -425,6 +426,50 @@ func TestRunSessionDialAndReadErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "read websocket message") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func countHeartbeatLoopGoroutines() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "(*Client).heartbeatLoop")
+}
+
+func TestRunSessionCancelsHeartbeatLoopOnCleanClose(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "rotate")
+	}))
+	defer ts.Close()
+
+	c := &Client{
+		cfg: ClientConfig{
+			ServerURL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+			APIKey:            "dk_test",
+			Logger:            discardLogger(),
+			HeartbeatInterval: time.Hour,
+		},
+	}
+
+	baseline := countHeartbeatLoopGoroutines()
+	for i := 0; i < 3; i++ {
+		if err := c.runSession(context.Background()); err != nil {
+			t.Fatalf("run session %d: %v", i, err)
+		}
+	}
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if countHeartbeatLoopGoroutines() <= baseline {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("expected heartbeat loop goroutines to return to baseline=%d, got=%d", baseline, countHeartbeatLoopGoroutines())
 }
 
 func TestHeartbeatLoopWriteError(t *testing.T) {

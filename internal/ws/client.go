@@ -144,8 +144,17 @@ func (c *Client) runSession(ctx context.Context) error {
 	c.emitState("connected")
 	c.cfg.Logger.Info("websocket connected")
 
+	sessionCtx, cancelSession := context.WithCancel(ctx)
 	heartbeatErr := make(chan error, 1)
-	go c.heartbeatLoop(ctx, conn, heartbeatErr)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		c.heartbeatLoop(sessionCtx, conn, heartbeatErr)
+	}()
+	defer func() {
+		cancelSession()
+		<-heartbeatDone
+	}()
 
 	readPollInterval := c.cfg.HeartbeatInterval
 	if readPollInterval <= 0 || readPollInterval > defaultWriteTimeout {
@@ -154,7 +163,7 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-sessionCtx.Done():
 			return nil
 		case err := <-heartbeatErr:
 			if err != nil && !isCloseError(err) {
@@ -164,7 +173,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		default:
 		}
 
-		readCtx, cancelRead := context.WithTimeout(ctx, readPollInterval)
+		readCtx, cancelRead := context.WithTimeout(sessionCtx, readPollInterval)
 		_, payload, err := conn.Read(readCtx)
 		cancelRead()
 		if err != nil {
@@ -177,7 +186,7 @@ func (c *Client) runSession(ctx context.Context) error {
 			return fmt.Errorf("read websocket message: %w", err)
 		}
 
-		if err := c.handleMessage(ctx, conn, payload); err != nil {
+		if err := c.handleMessage(sessionCtx, conn, payload); err != nil {
 			return err
 		}
 	}
