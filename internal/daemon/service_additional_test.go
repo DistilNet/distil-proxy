@@ -72,9 +72,15 @@ func TestStartWritesStatusAndPreventsDuplicate(t *testing.T) {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 
-	if err := writePID(paths, os.Getpid()); err != nil {
+	if err := writePID(paths, pid); err != nil {
 		t.Fatalf("write pid: %v", err)
 	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return "sh", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
 	err = Start(paths, cfg)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("expected already running error, got %v", err)
@@ -269,8 +275,17 @@ func TestStartForegroundDetectsExistingDaemon(t *testing.T) {
 	if err := writePID(paths, os.Getpid()); err != nil {
 		t.Fatalf("write pid: %v", err)
 	}
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return filepath.Base(expectedPath), nil
+	}
+	defer func() { processNameFn = origProcessName }()
 
-	err := StartForeground(context.Background(), paths, cfg, io.Discard)
+	err = StartForeground(context.Background(), paths, cfg, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("expected already running error, got %v", err)
 	}
@@ -532,6 +547,125 @@ func TestRunningPIDAndMarkStopped(t *testing.T) {
 	}
 	if status.PID != 777 || status.Running || status.WSState != "stopped" {
 		t.Fatalf("unexpected status after markStopped: %+v", status)
+	}
+}
+
+func TestRunningPIDRejectsOwnershipMismatch(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, os.Getpid()); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return "not-distil-proxy", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	if pid, ok := runningPID(paths); ok || pid != 0 {
+		t.Fatalf("expected no owned running pid, got pid=%d ok=%t", pid, ok)
+	}
+	if _, err := os.Stat(paths.PIDFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected ownership-mismatched pid removed, err=%v", err)
+	}
+}
+
+func TestDaemonOwnsPIDBranches(t *testing.T) {
+	origExecPath := execPathFunc
+	origProcessName := processNameFn
+	t.Cleanup(func() {
+		execPathFunc = origExecPath
+		processNameFn = origProcessName
+	})
+
+	if daemonOwnsPID(0) {
+		t.Fatal("expected pid<=0 to be rejected")
+	}
+
+	execPathFunc = func() (string, error) { return "", errors.New("no executable") }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected exec path error to reject ownership")
+	}
+
+	execPathFunc = func() (string, error) { return "   ", nil }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected blank executable name to reject ownership")
+	}
+
+	execPathFunc = func() (string, error) { return "/tmp/distil-proxy", nil }
+	processNameFn = func(_ int) (string, error) { return "", errors.New("process lookup failed") }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected process lookup error to reject ownership")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "/tmp/other-proc", nil }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected name mismatch to reject ownership")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "distil-proxy", nil }
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected basename match to accept ownership")
+	}
+}
+
+func TestProcessNameByPID(t *testing.T) {
+	t.Run("current-pid", func(t *testing.T) {
+		name, err := processNameByPID(os.Getpid())
+		if err != nil {
+			if strings.Contains(err.Error(), "operation not permitted") {
+				t.Skipf("process lookup unavailable in sandbox: %v", err)
+			}
+			t.Fatalf("expected current pid name lookup to succeed, got %v", err)
+		}
+		if strings.TrimSpace(name) == "" {
+			t.Fatalf("expected non-empty process name, got %q", name)
+		}
+	})
+
+	t.Run("invalid-pid", func(t *testing.T) {
+		if _, err := processNameByPID(99999999); err == nil {
+			t.Fatal("expected lookup error for invalid pid")
+		} else if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("process lookup unavailable in sandbox: %v", err)
+		}
+	})
+
+	t.Run("empty-process-name", func(t *testing.T) {
+		origLookup := processLookupCmd
+		processLookupCmd = func(_ int) *exec.Cmd {
+			return exec.Command("sh", "-c", "printf ''")
+		}
+		defer func() { processLookupCmd = origLookup }()
+
+		_, err := processNameByPID(os.Getpid())
+		if err == nil || !strings.Contains(err.Error(), "empty process name") {
+			t.Fatalf("expected empty process name error, got %v", err)
+		}
+	})
+}
+
+func TestTerminateProcessNilAndRunning(t *testing.T) {
+	terminateProcess(nil)
+
+	cmd := exec.Command("sh", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep process: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if pid <= 0 {
+		t.Fatalf("expected process pid > 0, got %d", pid)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("kill", "-KILL", strconv.Itoa(pid)).Run()
+	})
+
+	terminateProcess(cmd.Process)
+	if processRunning(pid) {
+		t.Fatalf("expected terminated pid %d to be stopped", pid)
 	}
 }
 

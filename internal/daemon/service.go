@@ -26,16 +26,19 @@ var (
 	// ErrNotRunning is returned when a stop operation is requested while daemon is offline.
 	ErrNotRunning = errors.New("daemon is not running")
 
-	clientFactory = newWSClient
-	execPathFunc  = os.Executable
-	execCmdFunc   = exec.Command
-	stopTimeout   = 10 * time.Second
-	stopPoll      = 200 * time.Millisecond
-	statusTick    = 5 * time.Second
-	killFunc      = syscall.Kill
-	readAllFunc   = io.ReadAll
-	marshalStatus = json.MarshalIndent
-	processNameFn = processNameByPID
+	clientFactory    = newWSClient
+	execPathFunc     = os.Executable
+	execCmdFunc      = exec.Command
+	stopTimeout      = 10 * time.Second
+	stopPoll         = 200 * time.Millisecond
+	statusTick       = 5 * time.Second
+	killFunc         = syscall.Kill
+	readAllFunc      = io.ReadAll
+	marshalStatus    = json.MarshalIndent
+	processNameFn    = processNameByPID
+	processLookupCmd = func(pid int) *exec.Cmd {
+		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+	}
 )
 
 type wsRunner interface {
@@ -399,6 +402,10 @@ func runningPID(paths config.Paths) (int, bool) {
 		_ = removePID(paths)
 		return 0, false
 	}
+	if !daemonOwnsPID(pid) {
+		_ = removePID(paths)
+		return 0, false
+	}
 
 	return pid, true
 }
@@ -432,7 +439,7 @@ func daemonOwnsPID(pid int) bool {
 }
 
 func processNameByPID(pid int) (string, error) {
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+	cmd := processLookupCmd(pid)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("read process name: %w", err)
