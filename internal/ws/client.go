@@ -142,6 +142,11 @@ func (c *Client) runSession(ctx context.Context) error {
 	heartbeatErr := make(chan error, 1)
 	go c.heartbeatLoop(ctx, conn, heartbeatErr)
 
+	readPollInterval := c.cfg.HeartbeatInterval
+	if readPollInterval <= 0 || readPollInterval > defaultWriteTimeout {
+		readPollInterval = defaultWriteTimeout
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -154,8 +159,13 @@ func (c *Client) runSession(ctx context.Context) error {
 		default:
 		}
 
-		_, payload, err := conn.Read(ctx)
+		readCtx, cancelRead := context.WithTimeout(ctx, readPollInterval)
+		_, payload, err := conn.Read(readCtx)
+		cancelRead()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
 			if isCloseError(err) {
 				return nil
 			}
