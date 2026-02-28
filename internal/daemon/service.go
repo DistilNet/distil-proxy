@@ -384,7 +384,7 @@ func Status(paths config.Paths) (RuntimeStatus, error) {
 		return RuntimeStatus{}, err
 	}
 
-	if !status.StartedAt.IsZero() {
+	if status.Running && !status.StartedAt.IsZero() {
 		status.UptimeSeconds = int64(time.Since(status.StartedAt).Seconds())
 	}
 	if status.UpdatedAt.IsZero() {

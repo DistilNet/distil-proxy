@@ -87,6 +87,16 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "invalid log level",
+			cfg: Config{
+				APIKey:    "dk_abc123",
+				Server:    DefaultServerURL,
+				TimeoutMS: 1000,
+				LogLevel:  "verbose",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {

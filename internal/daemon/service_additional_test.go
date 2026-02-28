@@ -1093,6 +1093,36 @@ func TestStatusDefaultsWhenNoPIDAndEmptyStatus(t *testing.T) {
 	}
 }
 
+func TestStatusPreservesUptimeWhenStopped(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+
+	const persistedUptime = int64(123)
+	stoppedStatus := RuntimeStatus{
+		Running:       false,
+		WSState:       "stopped",
+		StartedAt:     time.Now().UTC().Add(-2 * time.Hour),
+		UpdatedAt:     time.Now().UTC().Add(-10 * time.Minute),
+		UptimeSeconds: persistedUptime,
+	}
+	if err := writeStatus(paths, stoppedStatus); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	status, err := Status(paths)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Running {
+		t.Fatalf("expected stopped status, got %+v", status)
+	}
+	if status.UptimeSeconds != persistedUptime {
+		t.Fatalf("expected persisted uptime %d, got %d", persistedUptime, status.UptimeSeconds)
+	}
+}
+
 func TestStatusRejectsPIDOwnershipMismatch(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	if err := config.EnsureStateDirs(paths); err != nil {

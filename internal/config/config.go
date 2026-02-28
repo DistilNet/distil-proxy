@@ -113,8 +113,20 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.LogLevel) == "" {
 		return errors.New("log_level is required")
 	}
+	if !isSupportedLogLevel(c.LogLevel) {
+		return fmt.Errorf("log_level must be one of: debug, info, warn, warning, error")
+	}
 
 	return nil
+}
+
+func isSupportedLogLevel(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug", "info", "warn", "warning", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 // ValidateAPIKey validates the public API key format.
