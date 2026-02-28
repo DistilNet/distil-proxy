@@ -242,12 +242,17 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 		return err
 	}
 
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
 	ticker := time.NewTicker(statusTick)
 	defer ticker.Stop()
+	tickerDone := make(chan struct{})
 	go func() {
+		defer close(tickerDone)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-ticker.C:
 				updateStatus(func(_ *RuntimeStatus) {})
@@ -255,7 +260,9 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 		}
 	}()
 
-	runErr := runClientWithRecovery(ctx, client)
+	runErr := runClientWithRecovery(runCtx, client)
+	runCancel()
+	<-tickerDone
 	if runErr != nil {
 		updateStatus(func(s *RuntimeStatus) {
 			s.LastError = runErr.Error()
