@@ -1,6 +1,6 @@
 running: false
 pid: 0
-ws_state: connected
+ws_state: stopped
 uptime_seconds: 42
 jobs_served: 7
 connect_attempts: 2

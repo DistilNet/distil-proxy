@@ -1148,6 +1148,36 @@ func TestStatusRejectsPIDOwnershipMismatch(t *testing.T) {
 	if status.Running {
 		t.Fatalf("expected status to report not running for ownership mismatch: %+v", status)
 	}
+	if status.WSState != "stopped" {
+		t.Fatalf("expected ws_state=stopped for ownership mismatch, got %+v", status)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file removed, err=%v", statErr)
+	}
+}
+
+func TestStatusForcesStoppedStateWhenPIDNotRunning(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, 999999); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: 999999, Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	status, err := Status(paths)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Running {
+		t.Fatalf("expected status to report not running for dead pid: %+v", status)
+	}
+	if status.WSState != "stopped" {
+		t.Fatalf("expected ws_state=stopped for dead pid, got %+v", status)
+	}
 	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected stale pid file removed, err=%v", statErr)
 	}

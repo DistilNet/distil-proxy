@@ -371,15 +371,11 @@ func Status(paths config.Paths) (RuntimeStatus, error) {
 		status.Running = processRunning(pid) && daemonOwnsPID(pid)
 		if !status.Running {
 			_ = removePID(paths)
-			if status.WSState == "" {
-				status.WSState = "stopped"
-			}
+			status.WSState = "stopped"
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
 		status.Running = false
-		if status.WSState == "" {
-			status.WSState = "stopped"
-		}
+		status.WSState = "stopped"
 	} else {
 		return RuntimeStatus{}, err
 	}
