@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,7 +34,6 @@ var (
 	stopPoll         = 200 * time.Millisecond
 	statusTick       = 5 * time.Second
 	killFunc         = syscall.Kill
-	readAllFunc      = io.ReadAll
 	marshalStatus    = json.MarshalIndent
 	processNameFn    = processNameByPID
 	processLookupCmd = func(pid int) *exec.Cmd {
@@ -368,7 +368,13 @@ func Status(paths config.Paths) (RuntimeStatus, error) {
 	pid, err := readPID(paths)
 	if err == nil {
 		status.PID = pid
-		status.Running = processRunning(pid)
+		status.Running = processRunning(pid) && daemonOwnsPID(pid)
+		if !status.Running {
+			_ = removePID(paths)
+			if status.WSState == "" {
+				status.WSState = "stopped"
+			}
+		}
 	} else if errors.Is(err, os.ErrNotExist) {
 		status.Running = false
 		if status.WSState == "" {
@@ -558,20 +564,42 @@ func ReadLogTail(paths config.Paths, n int) ([]string, error) {
 	}
 	defer f.Close()
 
-	content, err := readAllFunc(f)
-	if err != nil {
-		return nil, fmt.Errorf("read log file: %w", err)
+	lines := make([]string, n)
+	count := 0
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			lines[count%n] = strings.TrimRight(line, "\r\n")
+			count++
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read log file: %w", err)
+		}
 	}
 
-	text := strings.TrimRight(string(content), "\n")
-	if text == "" {
+	if count == 0 {
 		return []string{}, nil
 	}
 
-	lines := strings.Split(text, "\n")
-	if len(lines) <= n {
-		return lines, nil
+	if count <= n {
+		return trimTrailingEmptyLogLines(append([]string(nil), lines[:count]...)), nil
 	}
 
-	return lines[len(lines)-n:], nil
+	tail := make([]string, n)
+	start := count % n
+	for i := 0; i < n; i++ {
+		tail[i] = lines[(start+i)%n]
+	}
+	return trimTrailingEmptyLogLines(tail), nil
+}
+
+func trimTrailingEmptyLogLines(lines []string) []string {
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }

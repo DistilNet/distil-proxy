@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,6 +84,16 @@ func TestStatusReflectsRunningPID(t *testing.T) {
 	if err := os.WriteFile(paths.PIDFile, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
 		t.Fatalf("write pid: %v", err)
 	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return filepath.Base(expectedPath), nil
+	}
+	defer func() { processNameFn = origProcessName }()
 
 	status, err := Status(paths)
 	if err != nil {

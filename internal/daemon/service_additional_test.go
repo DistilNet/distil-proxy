@@ -1011,6 +1011,36 @@ func TestStatusDefaultsWhenNoPIDAndEmptyStatus(t *testing.T) {
 	}
 }
 
+func TestStatusRejectsPIDOwnershipMismatch(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, os.Getpid()); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: os.Getpid(), Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return "unrelated-process", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	status, err := Status(paths)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Running {
+		t.Fatalf("expected status to report not running for ownership mismatch: %+v", status)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file removed, err=%v", statErr)
+	}
+}
+
 func TestNewWSClientAndWriterErrorBranches(t *testing.T) {
 	if _, err := newWSClient(ws.ClientConfig{ServerURL: "wss://proxy.distil.net/ws", APIKey: "dk_test"}); err != nil {
 		t.Fatalf("new ws client: %v", err)
@@ -1042,15 +1072,12 @@ func TestReadLogTailReadError(t *testing.T) {
 	if err := config.EnsureStateDirs(paths); err != nil {
 		t.Fatalf("ensure dirs: %v", err)
 	}
-	if err := os.WriteFile(paths.LogFile, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write log file: %v", err)
+	if err := os.Remove(paths.LogFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove log file: %v", err)
 	}
-
-	origReadAll := readAllFunc
-	readAllFunc = func(io.Reader) ([]byte, error) {
-		return nil, errors.New("read failed")
+	if err := os.Mkdir(paths.LogFile, 0o700); err != nil {
+		t.Fatalf("create directory at log path: %v", err)
 	}
-	defer func() { readAllFunc = origReadAll }()
 
 	_, err := ReadLogTail(paths, 10)
 	if err == nil || !strings.Contains(err.Error(), "read log file") {
