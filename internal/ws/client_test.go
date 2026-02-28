@@ -213,3 +213,50 @@ func TestClientReconnectsAfterDisconnect(t *testing.T) {
 		t.Fatalf("expected at least 2 connections, got %d", got)
 	}
 }
+
+func TestClientReconnectBackoffResetsAfterCleanClose(t *testing.T) {
+	var connections atomic.Int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		connections.Add(1)
+		_ = conn.Close(websocket.StatusNormalClosure, "rotate")
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 260*time.Millisecond)
+	defer cancel()
+
+	client, err := NewClient(ClientConfig{
+		ServerURL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+		APIKey:            "dk_backoff_reset_123",
+		ProtocolVersion:   DefaultProtocolVersion,
+		Logger:            slog.Default(),
+		HeartbeatInterval: time.Hour,
+		InitialReconnect:  15 * time.Millisecond,
+		MaxReconnectWait:  120 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.Run(ctx) }()
+
+	select {
+	case runErr := <-errCh:
+		if runErr != nil {
+			t.Fatalf("client run returned error: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for client to stop")
+	}
+
+	if got := connections.Load(); got < 7 {
+		t.Fatalf("expected frequent reconnects after clean closes, got %d connections", got)
+	}
+}

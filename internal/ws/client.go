@@ -103,6 +103,10 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil {
 			c.emitError(err)
 			c.emitState("reconnecting")
+		} else {
+			// Reset reconnect delay after clean sessions so exponential backoff
+			// only applies to consecutive failures.
+			backoff = c.cfg.InitialReconnect
 		}
 
 		timer := time.NewTimer(backoff)
@@ -114,9 +118,11 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-timer.C:
 		}
 
-		backoff *= 2
-		if backoff > c.cfg.MaxReconnectWait {
-			backoff = c.cfg.MaxReconnectWait
+		if err != nil {
+			backoff *= 2
+			if backoff > c.cfg.MaxReconnectWait {
+				backoff = c.cfg.MaxReconnectWait
+			}
 		}
 	}
 }
