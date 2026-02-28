@@ -165,9 +165,7 @@ func newAuthCmd() *cobra.Command {
 
 			cfg, err := config.Load(paths)
 			if err != nil {
-				if !errors.Is(err, config.ErrConfigNotFound) {
-					return err
-				}
+				// Allow auth to recover malformed/legacy configs by rewriting from defaults.
 				cfg = config.Config{}
 			}
 

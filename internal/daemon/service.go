@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ var (
 	killFunc      = syscall.Kill
 	readAllFunc   = io.ReadAll
 	marshalStatus = json.MarshalIndent
+	processNameFn = processNameByPID
 )
 
 type wsRunner interface {
@@ -99,6 +101,7 @@ func Start(paths config.Paths, cfg config.Config) error {
 	}
 
 	if err := writePID(paths, cmd.Process.Pid); err != nil {
+		terminateProcess(cmd.Process)
 		return err
 	}
 
@@ -113,6 +116,8 @@ func Start(paths config.Paths, cfg config.Config) error {
 		UptimeSeconds: 0,
 	}
 	if err := writeStatus(paths, status); err != nil {
+		_ = removePID(paths)
+		terminateProcess(cmd.Process)
 		return err
 	}
 
@@ -302,6 +307,13 @@ func Stop(paths config.Paths) error {
 		markStopped(paths, pid, "stopped")
 		return ErrNotRunning
 	}
+	if !daemonOwnsPID(pid) {
+		if err := removePID(paths); err != nil {
+			return err
+		}
+		markStopped(paths, pid, "stopped")
+		return ErrNotRunning
+	}
 
 	if err := killFunc(pid, syscall.SIGTERM); err != nil {
 		return fmt.Errorf("signal daemon pid %d: %w", pid, err)
@@ -398,6 +410,46 @@ func processRunning(pid int) bool {
 
 	err := killFunc(pid, syscall.Signal(0))
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func daemonOwnsPID(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	execPath, err := execPathFunc()
+	if err != nil {
+		return false
+	}
+	expectedName := filepath.Base(strings.TrimSpace(execPath))
+	if expectedName == "" {
+		return false
+	}
+	processName, err := processNameFn(pid)
+	if err != nil {
+		return false
+	}
+	return filepath.Base(strings.TrimSpace(processName)) == expectedName
+}
+
+func processNameByPID(pid int) (string, error) {
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("read process name: %w", err)
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return "", errors.New("empty process name")
+	}
+	return name, nil
+}
+
+func terminateProcess(proc *os.Process) {
+	if proc == nil {
+		return
+	}
+	_ = proc.Kill()
+	_, _ = proc.Wait()
 }
 
 func writePID(paths config.Paths, pid int) error {

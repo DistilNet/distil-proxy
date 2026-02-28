@@ -53,6 +53,52 @@ func TestAuthRejectsInvalidKey(t *testing.T) {
 	}
 }
 
+func TestAuthRepairsInvalidExistingConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "legacy-proxy-key",
+			payload: `{"proxy_key":"dpk_legacy","server":"wss://proxy.distil.net/ws"}`,
+		},
+		{
+			name:    "malformed-json",
+			payload: `{"api_key":`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			paths := config.DefaultPaths(home)
+			if err := config.EnsureStateDirs(paths); err != nil {
+				t.Fatalf("ensure state dirs: %v", err)
+			}
+			if err := os.WriteFile(paths.ConfigFile, []byte(tc.payload), 0o600); err != nil {
+				t.Fatalf("write config fixture: %v", err)
+			}
+
+			out, err := runCLI(t, home, "auth", "dk_auth_repair")
+			if err != nil {
+				t.Fatalf("auth command error: %v", err)
+			}
+			if !strings.Contains(out, "updated config") {
+				t.Fatalf("unexpected output: %q", out)
+			}
+
+			cfg, err := config.Load(paths)
+			if err != nil {
+				t.Fatalf("load repaired config: %v", err)
+			}
+			if cfg.APIKey != "dk_auth_repair" {
+				t.Fatalf("expected repaired api key, got %+v", cfg)
+			}
+		})
+	}
+}
+
 func TestStartAndRestartRequireConfig(t *testing.T) {
 	home := t.TempDir()
 

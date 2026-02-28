@@ -27,6 +27,17 @@ func testConfig() config.Config {
 	}
 }
 
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !processRunning(pid) {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return !processRunning(pid)
+}
+
 func TestStartWritesStatusAndPreventsDuplicate(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	cfg := testConfig()
@@ -180,6 +191,75 @@ func TestStartErrorPaths(t *testing.T) {
 	})
 }
 
+func TestStartCleansUpChildWhenWritePIDFails(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	paths.PIDFile = filepath.Join(paths.RootDir, "missing", "pid")
+	var startedCmd *exec.Cmd
+
+	origExecPath := execPathFunc
+	origExecCmd := execCmdFunc
+	execPathFunc = func() (string, error) { return "/bin/sh", nil }
+	execCmdFunc = func(_ string, _ ...string) *exec.Cmd {
+		startedCmd = exec.Command("sh", "-c", "sleep 30")
+		return startedCmd
+	}
+	defer func() {
+		execPathFunc = origExecPath
+		execCmdFunc = origExecCmd
+	}()
+
+	err := Start(paths, testConfig())
+	if err == nil || !strings.Contains(err.Error(), "write pid file") {
+		t.Fatalf("expected write pid error, got %v", err)
+	}
+	if startedCmd == nil || startedCmd.Process == nil || startedCmd.Process.Pid <= 0 {
+		t.Fatalf("expected child process pid after start failure, got %+v", startedCmd)
+	}
+	pid := startedCmd.Process.Pid
+	t.Cleanup(func() {
+		_ = exec.Command("kill", "-KILL", strconv.Itoa(pid)).Run()
+	})
+	if !waitForProcessExit(pid, 2*time.Second) {
+		t.Fatalf("expected child pid %d to be terminated after writePID failure", pid)
+	}
+}
+
+func TestStartCleansUpChildWhenWriteStatusFails(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	paths.StatusFile = paths.RootDir
+	var startedCmd *exec.Cmd
+
+	origExecPath := execPathFunc
+	origExecCmd := execCmdFunc
+	execPathFunc = func() (string, error) { return "/bin/sh", nil }
+	execCmdFunc = func(_ string, _ ...string) *exec.Cmd {
+		startedCmd = exec.Command("sh", "-c", "sleep 30")
+		return startedCmd
+	}
+	defer func() {
+		execPathFunc = origExecPath
+		execCmdFunc = origExecCmd
+	}()
+
+	err := Start(paths, testConfig())
+	if err == nil || !strings.Contains(err.Error(), "replace status file") {
+		t.Fatalf("expected write status error, got %v", err)
+	}
+	if startedCmd == nil || startedCmd.Process == nil || startedCmd.Process.Pid <= 0 {
+		t.Fatalf("expected child process pid after start failure, got %+v", startedCmd)
+	}
+	pid := startedCmd.Process.Pid
+	t.Cleanup(func() {
+		_ = exec.Command("kill", "-KILL", strconv.Itoa(pid)).Run()
+	})
+	if !waitForProcessExit(pid, 2*time.Second) {
+		t.Fatalf("expected child pid %d to be terminated after writeStatus failure", pid)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected pid file removed after status write failure, err=%v", statErr)
+	}
+}
+
 func TestStartForegroundDetectsExistingDaemon(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	cfg := testConfig()
@@ -269,6 +349,16 @@ func TestStopRunningProcess(t *testing.T) {
 	if err := writePID(paths, pid); err != nil {
 		t.Fatalf("write pid: %v", err)
 	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return filepath.Base(expectedPath), nil
+	}
+	defer func() { processNameFn = origProcessName }()
 
 	if err := Stop(paths); err != nil {
 		t.Fatalf("stop failed: %v", err)
@@ -667,6 +757,16 @@ func TestStopTimeout(t *testing.T) {
 		t.Fatalf("write pid: %v", err)
 	}
 
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return filepath.Base(expectedPath), nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
 	origTimeout := stopTimeout
 	origPoll := stopPoll
 	stopTimeout = 200 * time.Millisecond
@@ -682,6 +782,46 @@ func TestStopTimeout(t *testing.T) {
 	}
 }
 
+func TestStopRejectsPIDOwnershipMismatch(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, os.Getpid()); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: os.Getpid(), Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return "unrelated-process", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	var signaled bool
+	origKill := killFunc
+	killFunc = func(_ int, sig syscall.Signal) error {
+		if sig != 0 {
+			signaled = true
+		}
+		return nil
+	}
+	defer func() { killFunc = origKill }()
+
+	err := Stop(paths)
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("expected ErrNotRunning for ownership mismatch, got %v", err)
+	}
+	if signaled {
+		t.Fatal("expected no SIGTERM when process identity does not match daemon executable")
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected pid removed after ownership mismatch, err=%v", statErr)
+	}
+}
+
 func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	if err := config.EnsureStateDirs(paths); err != nil {
@@ -690,6 +830,16 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	if err := writePID(paths, os.Getpid()); err != nil {
 		t.Fatalf("write pid: %v", err)
 	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return filepath.Base(expectedPath), nil
+	}
+	defer func() { processNameFn = origProcessName }()
 
 	origKill := killFunc
 	killFunc = func(_ int, sig syscall.Signal) error {
@@ -700,7 +850,7 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	}
 	defer func() { killFunc = origKill }()
 
-	err := Stop(paths)
+	err = Stop(paths)
 	if err == nil || !strings.Contains(err.Error(), "signal daemon pid") {
 		t.Fatalf("expected signal error, got %v", err)
 	}
