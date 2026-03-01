@@ -10,12 +10,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/exec-io/distil-proxy/internal/config"
 	"github.com/exec-io/distil-proxy/internal/fetch"
@@ -37,7 +38,7 @@ var (
 	marshalStatus    = json.MarshalIndent
 	processNameFn    = processNameByPID
 	processLookupCmd = func(pid int) *exec.Cmd {
-		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
 	}
 )
 
@@ -436,15 +437,31 @@ func daemonOwnsPID(pid int) bool {
 	if err != nil {
 		return false
 	}
-	expectedName := filepath.Base(strings.TrimSpace(execPath))
-	if expectedName == "" {
+	expectedPath := strings.TrimSpace(execPath)
+	if expectedPath == "" {
 		return false
 	}
-	processName, err := processNameFn(pid)
+	processCommand, err := processNameFn(pid)
 	if err != nil {
 		return false
 	}
-	return filepath.Base(strings.TrimSpace(processName)) == expectedName
+	return commandMatchesExecutable(processCommand, expectedPath)
+}
+
+func commandMatchesExecutable(commandLine, expectedPath string) bool {
+	commandLine = strings.TrimSpace(commandLine)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if commandLine == "" || expectedPath == "" {
+		return false
+	}
+	if commandLine == expectedPath {
+		return true
+	}
+	if !strings.HasPrefix(commandLine, expectedPath) || len(commandLine) <= len(expectedPath) {
+		return false
+	}
+	nextRune, _ := utf8.DecodeRuneInString(commandLine[len(expectedPath):])
+	return unicode.IsSpace(nextRune)
 }
 
 func processNameByPID(pid int) (string, error) {

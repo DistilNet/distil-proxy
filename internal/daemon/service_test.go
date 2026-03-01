@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -91,7 +90,7 @@ func TestStatusReflectsRunningPID(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath, nil
 	}
 	defer func() { processNameFn = origProcessName }()
 

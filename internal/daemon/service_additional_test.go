@@ -77,7 +77,7 @@ func TestStartWritesStatusAndPreventsDuplicate(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return "sh", nil
+		return "/bin/sh", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -281,7 +281,7 @@ func TestStartForegroundDetectsExistingDaemon(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath, nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -371,7 +371,7 @@ func TestStopRunningProcess(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath, nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -606,9 +606,14 @@ func TestDaemonOwnsPIDBranches(t *testing.T) {
 		t.Fatal("expected name mismatch to reject ownership")
 	}
 
-	processNameFn = func(_ int) (string, error) { return "distil-proxy", nil }
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy --foreground", nil }
 	if !daemonOwnsPID(os.Getpid()) {
-		t.Fatal("expected basename match to accept ownership")
+		t.Fatal("expected exact executable command match to accept ownership")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy-other --foreground", nil }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected executable prefix collisions to be rejected")
 	}
 }
 
@@ -921,7 +926,7 @@ func TestStopTimeout(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath, nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -953,14 +958,12 @@ func TestStopTreatsOwnershipChangeDuringWaitAsStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve executable path: %v", err)
 	}
-	expectedName := filepath.Base(expectedPath)
-
 	origProcessName := processNameFn
 	ownershipChecks := 0
 	processNameFn = func(_ int) (string, error) {
 		ownershipChecks++
 		if ownershipChecks == 1 {
-			return expectedName, nil
+			return expectedPath, nil
 		}
 		return "pid-reused-by-other-process", nil
 	}
@@ -1053,7 +1056,7 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath, nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
