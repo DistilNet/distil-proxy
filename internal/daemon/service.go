@@ -329,6 +329,13 @@ func Stop(paths config.Paths) error {
 	}
 
 	if err := killFunc(pid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			if err := removePID(paths); err != nil {
+				return err
+			}
+			markStopped(paths, pid, "stopped")
+			return nil
+		}
 		return fmt.Errorf("signal daemon pid %d: %w", pid, err)
 	}
 
@@ -456,33 +463,14 @@ func commandMatchesExecutable(commandLine, expectedPath string) bool {
 	if commandLine == "" || expectedPath == "" {
 		return false
 	}
-	if commandLineHasExecutablePrefix(commandLine, expectedPath) {
-		return true
-	}
-	candidates := make([]string, 0, 2)
-	if commandPath, ok := commandExecutablePath(commandLine); ok {
-		candidates = append(candidates, commandPath)
-	}
-	if commandPath, ok := commandExecutableForDaemonRun(commandLine); ok {
-		candidates = append(candidates, commandPath)
-	}
-	for _, commandPath := range candidates {
-		if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
-			return true
-		}
-	}
-	return false
-}
-
-func commandLineHasExecutablePrefix(commandLine, expectedPath string) bool {
-	if commandLine == expectedPath {
-		return true
-	}
-	if !strings.HasPrefix(commandLine, expectedPath) || len(commandLine) <= len(expectedPath) {
+	commandPath, ok := commandExecutableForDaemonRun(commandLine)
+	if !ok {
 		return false
 	}
-	nextRune, _ := utf8.DecodeRuneInString(commandLine[len(expectedPath):])
-	return unicode.IsSpace(nextRune)
+	if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
+		return true
+	}
+	return false
 }
 
 func processNameByPID(pid int) (string, error) {

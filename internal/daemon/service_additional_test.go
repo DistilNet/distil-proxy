@@ -77,7 +77,7 @@ func TestStartWritesStatusAndPreventsDuplicate(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return "/bin/sh", nil
+		return "/bin/sh __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -309,7 +309,7 @@ func TestStartForegroundDetectsExistingDaemon(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return expectedPath, nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -399,7 +399,7 @@ func TestStopRunningProcess(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return expectedPath, nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -634,9 +634,14 @@ func TestDaemonOwnsPIDBranches(t *testing.T) {
 		t.Fatal("expected name mismatch to reject ownership")
 	}
 
-	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy --foreground", nil }
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy __run", nil }
 	if !daemonOwnsPID(os.Getpid()) {
-		t.Fatal("expected exact executable command match to accept ownership")
+		t.Fatal("expected daemon __run invocation to accept ownership")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy auth dk_test", nil }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected non-daemon CLI invocation to be rejected")
 	}
 
 	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy-other --foreground", nil }
@@ -758,6 +763,9 @@ func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
 	}
 	if commandMatchesExecutable(`"/tmp/unclosed`, "/tmp/distil-proxy") {
 		t.Fatal("expected malformed quoted command line to be rejected")
+	}
+	if commandMatchesExecutable("/tmp/distil-proxy auth", "/tmp/distil-proxy") {
+		t.Fatal("expected non-daemon command line to be rejected")
 	}
 }
 
@@ -1167,7 +1175,7 @@ func TestStopTimeout(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return expectedPath, nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -1204,7 +1212,7 @@ func TestStopTreatsOwnershipChangeDuringWaitAsStopped(t *testing.T) {
 	processNameFn = func(_ int) (string, error) {
 		ownershipChecks++
 		if ownershipChecks == 1 {
-			return expectedPath, nil
+			return expectedPath + " __run", nil
 		}
 		return "pid-reused-by-other-process", nil
 	}
@@ -1297,7 +1305,7 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return expectedPath, nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -1313,6 +1321,57 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	err = Stop(paths)
 	if err == nil || !strings.Contains(err.Error(), "signal daemon pid") {
 		t.Fatalf("expected signal error, got %v", err)
+	}
+}
+
+func TestStopTreatsSIGTERMESRCHAsStopped(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	pid := os.Getpid()
+	if err := writePID(paths, pid); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: pid, Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return expectedPath + " __run", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	origKill := killFunc
+	killFunc = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return nil
+		}
+		if sig == syscall.SIGTERM {
+			return syscall.ESRCH
+		}
+		t.Fatalf("unexpected signal: %v", sig)
+		return nil
+	}
+	defer func() { killFunc = origKill }()
+
+	if err := Stop(paths); err != nil {
+		t.Fatalf("expected ESRCH on SIGTERM to be treated as stopped, got %v", err)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected pid file removed after ESRCH, err=%v", statErr)
+	}
+	status, err := readStatus(paths)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status.Running || status.WSState != "stopped" {
+		t.Fatalf("expected stopped status after ESRCH race, got %+v", status)
 	}
 }
 

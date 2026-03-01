@@ -90,7 +90,7 @@ func TestStatusReflectsRunningPID(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return expectedPath, nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
