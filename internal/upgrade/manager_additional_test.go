@@ -377,6 +377,21 @@ func TestDownloadAndCopyReplaceHelpers(t *testing.T) {
 			t.Fatalf("unexpected replaced content %q", string(replaced))
 		}
 
+		preservedDst := filepath.Join(root, "preserved-dst")
+		if err := os.WriteFile(preservedDst, []byte("keep"), 0o600); err != nil {
+			t.Fatalf("write preserved dst: %v", err)
+		}
+		if err := replaceFile(filepath.Join(root, "missing-src"), preservedDst); err == nil {
+			t.Fatal("expected replace error for missing src when destination exists")
+		}
+		preservedContent, err := os.ReadFile(preservedDst)
+		if err != nil {
+			t.Fatalf("read preserved dst: %v", err)
+		}
+		if string(preservedContent) != "keep" {
+			t.Fatalf("expected destination to remain unchanged, got %q", string(preservedContent))
+		}
+
 		if err := replaceFile(filepath.Join(root, "missing-src"), filepath.Join(root, "missing-dst")); err == nil {
 			t.Fatal("expected replace error for missing src")
 		}

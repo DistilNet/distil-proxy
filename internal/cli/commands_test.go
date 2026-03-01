@@ -199,6 +199,11 @@ func TestServiceCommands(t *testing.T) {
 	if _, err := runCLI(t, home, "auth", "dk_service_install"); err != nil {
 		t.Fatalf("seed config for service command: %v", err)
 	}
+	paths := config.DefaultPaths(home)
+	serviceBinary := filepath.Join(paths.BinDir, "distil-proxy")
+	if err := os.WriteFile(serviceBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("seed service binary: %v", err)
+	}
 
 	origInstall := installServiceFunc
 	origRemove := removeServiceFunc
@@ -244,6 +249,11 @@ func TestServiceInstallCommandError(t *testing.T) {
 	if _, err := runCLI(t, home, "auth", "dk_service_error"); err != nil {
 		t.Fatalf("seed config for service install error path: %v", err)
 	}
+	paths := config.DefaultPaths(home)
+	serviceBinary := filepath.Join(paths.BinDir, "distil-proxy")
+	if err := os.WriteFile(serviceBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("seed service binary for error path: %v", err)
+	}
 	origInstall := installServiceFunc
 	t.Cleanup(func() { installServiceFunc = origInstall })
 
@@ -259,6 +269,18 @@ func TestServiceInstallRequiresConfig(t *testing.T) {
 	_, err := runCLI(t, home, "service", "install")
 	if err == nil || !strings.Contains(err.Error(), "config not found; run 'distil-proxy auth <dk_key>' first") {
 		t.Fatalf("expected service install config error, got %v", err)
+	}
+}
+
+func TestServiceInstallRequiresManagedBinary(t *testing.T) {
+	home := t.TempDir()
+	if _, err := runCLI(t, home, "auth", "dk_service_binary"); err != nil {
+		t.Fatalf("seed config for managed binary check: %v", err)
+	}
+
+	_, err := runCLI(t, home, "service", "install")
+	if err == nil || !strings.Contains(err.Error(), "service binary not found") {
+		t.Fatalf("expected missing managed binary error, got %v", err)
 	}
 }
 

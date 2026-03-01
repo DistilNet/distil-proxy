@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -346,7 +348,22 @@ func copyFile(src, dst string) error {
 func replaceFile(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
+	} else if !shouldRetryReplace(err) {
+		return err
 	}
-	_ = os.Remove(dst)
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return os.Rename(src, dst)
+}
+
+func shouldRetryReplace(err error) bool {
+	if os.IsNotExist(err) {
+		return false
+	}
+	return errors.Is(err, syscall.EEXIST) ||
+		errors.Is(err, syscall.ENOTEMPTY) ||
+		errors.Is(err, syscall.EISDIR) ||
+		errors.Is(err, syscall.ENOTDIR) ||
+		errors.Is(err, syscall.EPERM)
 }
