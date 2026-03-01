@@ -1,0 +1,14 @@
+running: false
+pid: 0
+ws_state: stopped
+uptime_seconds: 42
+jobs_served: 7
+connect_attempts: 2
+reconnects: 1
+jobs_success: 7
+jobs_error: 1
+avg_latency_ms: 123
+latency_le_100_ms: 2
+latency_le_500_ms: 4
+latency_le_1000_ms: 1
+latency_gt_1000_ms: 0
