@@ -220,7 +220,11 @@ func (m *Manager) saveState(state UpgradeState) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(m.cfg.StatePath, data, 0o600)
+	tmp := m.cfg.StatePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return replaceFile(tmp, m.cfg.StatePath)
 }
 
 func (m *Manager) clearState() error {

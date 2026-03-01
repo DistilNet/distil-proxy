@@ -214,6 +214,16 @@ func TestStateAndFileHelperPaths(t *testing.T) {
 	if err := m.saveState(state); err != nil {
 		t.Fatalf("save state: %v", err)
 	}
+	if _, err := os.Stat(statePath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected state tmp file to be replaced, err=%v", err)
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("stat state file: %v", err)
+	}
+	if stateInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("expected 0600 state permissions, got %o", stateInfo.Mode().Perm())
+	}
 	loaded, err := m.loadState()
 	if err != nil {
 		t.Fatalf("load state: %v", err)
@@ -233,6 +243,19 @@ func TestStateAndFileHelperPaths(t *testing.T) {
 	}
 	if _, err := m.loadState(); err == nil {
 		t.Fatal("expected invalid json state load error")
+	}
+	if err := m.saveState(UpgradeState{ToVersion: "1.3.0", StartedOnce: false}); err != nil {
+		t.Fatalf("replace bad state: %v", err)
+	}
+	loaded, err = m.loadState()
+	if err != nil {
+		t.Fatalf("load replaced state: %v", err)
+	}
+	if loaded.ToVersion != "1.3.0" || loaded.StartedOnce {
+		t.Fatalf("unexpected replaced state: %+v", loaded)
+	}
+	if _, err := os.Stat(statePath + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no leftover tmp state file, err=%v", err)
 	}
 
 	contentPath := filepath.Join(root, "content.bin")
