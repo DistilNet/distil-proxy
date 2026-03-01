@@ -762,6 +762,25 @@ func TestCommandMatchesExecutableUsesSameFileIdentity(t *testing.T) {
 	}
 }
 
+func TestCommandMatchesExecutableNormalizesRelativeForegroundPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	expectedPath := filepath.Join(binDir, "distil-proxy")
+	if err := os.WriteFile(expectedPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write expected executable: %v", err)
+	}
+
+	if !commandMatchesExecutable("./distil-proxy start --foreground", expectedPath) {
+		t.Fatal("expected relative foreground command path to match expected executable")
+	}
+	if !commandMatchesExecutable("distil-proxy start --foreground", expectedPath) {
+		t.Fatal("expected bare foreground command path to match expected executable")
+	}
+}
+
 func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
 	if commandMatchesExecutable("command", "   ") {
 		t.Fatal("expected blank expectedPath to be rejected")
@@ -774,6 +793,12 @@ func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
 	}
 	if commandMatchesExecutable("/tmp/distil-proxy auth", "/tmp/distil-proxy") {
 		t.Fatal("expected non-daemon command line to be rejected")
+	}
+	if normalized, ok := normalizeRelativeCommandPath("/tmp/distil-proxy", "/tmp/expected"); ok || normalized != "" {
+		t.Fatal("expected absolute command path to skip relative normalization")
+	}
+	if normalized, ok := normalizeRelativeCommandPath("./distil-proxy", "   "); ok || normalized != "" {
+		t.Fatal("expected blank expected path to skip relative normalization")
 	}
 }
 

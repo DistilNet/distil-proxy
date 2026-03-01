@@ -475,8 +475,22 @@ func commandMatchesExecutable(commandLine, expectedPath string) bool {
 		if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
 			return true
 		}
+		if normalized, ok := normalizeRelativeCommandPath(commandPath, expectedPath); ok {
+			if normalized == expectedPath || sameExecutableFile(normalized, expectedPath) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+func normalizeRelativeCommandPath(commandPath, expectedPath string) (string, bool) {
+	commandPath = strings.TrimSpace(commandPath)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if commandPath == "" || expectedPath == "" || filepath.IsAbs(commandPath) {
+		return "", false
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(expectedPath), commandPath)), true
 }
 
 func processNameByPID(pid int) (string, error) {
