@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,8 +130,20 @@ func (c Config) Validate() error {
 	if c.UpgradeCheckHours <= 0 {
 		return errors.New("upgrade_check_hours must be > 0")
 	}
+	if !isSupportedLogLevel(c.LogLevel) {
+		return fmt.Errorf("log_level must be one of: debug, info, warn, warning, error")
+	}
 
 	return nil
+}
+
+func isSupportedLogLevel(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug", "info", "warn", "warning", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 // ValidateAPIKey validates the public API key format.
@@ -164,17 +177,25 @@ func Load(paths Paths) (Config, error) {
 	}
 
 	var cfg Config
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != nil {
+		if !errors.Is(err, io.EOF) {
+			return Config{}, fmt.Errorf("decode config: %w", err)
+		}
+	} else {
+		return Config{}, errors.New("decode config: trailing data after top-level object")
+	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if _, ok := raw["auto_upgrade"]; ok {
 		cfg.autoUpgradeSet = true
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 
 	cfg.ApplyDefaults()

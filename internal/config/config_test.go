@@ -100,6 +100,16 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "invalid log level",
+			cfg: Config{
+				APIKey:    "dk_abc123",
+				Server:    DefaultServerURL,
+				TimeoutMS: 1000,
+				LogLevel:  "verbose",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -216,6 +226,28 @@ func TestLoadLegacyProxyKeyFails(t *testing.T) {
 	_, err := Load(paths)
 	if err == nil {
 		t.Fatal("expected validation error for legacy proxy_key")
+	}
+}
+
+func TestLoadRejectsTrailingTopLevelJSON(t *testing.T) {
+	home := t.TempDir()
+	paths := DefaultPaths(home)
+
+	if err := EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure state dirs: %v", err)
+	}
+
+	payload := []byte("{\"api_key\":\"dk_abc\"}\n{\"api_key\":\"dk_extra\"}")
+	if err := os.WriteFile(paths.ConfigFile, payload, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(paths)
+	if err == nil {
+		t.Fatal("expected decode error for trailing JSON")
+	}
+	if !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("expected trailing data error, got %v", err)
 	}
 }
 

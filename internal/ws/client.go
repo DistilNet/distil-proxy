@@ -104,6 +104,10 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil {
 			c.emitError(err)
 			c.emitState("reconnecting")
+		} else {
+			// Reset reconnect delay after clean sessions so exponential backoff
+			// only applies to consecutive failures.
+			backoff = c.cfg.InitialReconnect
 		}
 
 		timer := time.NewTimer(backoff)
@@ -115,9 +119,11 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-timer.C:
 		}
 
-		backoff *= 2
-		if backoff > c.cfg.MaxReconnectWait {
-			backoff = c.cfg.MaxReconnectWait
+		if err != nil {
+			backoff *= 2
+			if backoff > c.cfg.MaxReconnectWait {
+				backoff = c.cfg.MaxReconnectWait
+			}
 		}
 	}
 }
@@ -139,8 +145,17 @@ func (c *Client) runSession(ctx context.Context) error {
 	c.emitState("connected")
 	c.cfg.Logger.Info("websocket connected")
 
+	sessionCtx, cancelSession := context.WithCancel(ctx)
 	heartbeatErr := make(chan error, 1)
-	go c.heartbeatLoop(ctx, conn, heartbeatErr)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		c.heartbeatLoop(sessionCtx, conn, heartbeatErr)
+	}()
+	defer func() {
+		cancelSession()
+		<-heartbeatDone
+	}()
 
 	readPollInterval := c.cfg.HeartbeatInterval
 	if readPollInterval <= 0 || readPollInterval > defaultWriteTimeout {
@@ -149,7 +164,7 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-sessionCtx.Done():
 			return nil
 		case err := <-heartbeatErr:
 			if err != nil && !isCloseError(err) {
@@ -159,7 +174,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		default:
 		}
 
-		readCtx, cancelRead := context.WithTimeout(ctx, readPollInterval)
+		readCtx, cancelRead := context.WithTimeout(sessionCtx, readPollInterval)
 		_, payload, err := conn.Read(readCtx)
 		cancelRead()
 		if err != nil {
@@ -172,7 +187,7 @@ func (c *Client) runSession(ctx context.Context) error {
 			return fmt.Errorf("read websocket message: %w", err)
 		}
 
-		if err := c.handleMessage(ctx, conn, payload); err != nil {
+		if err := c.handleMessage(sessionCtx, conn, payload); err != nil {
 			return err
 		}
 	}
@@ -232,12 +247,14 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 	fetchCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 	if err := c.cfg.JobRegistry.Start(req.ID, cancel); err != nil {
-		_ = c.writeJSON(ctx, conn, FetchError{
+		if err := c.writeJSON(ctx, conn, FetchError{
 			Type:    "fetch_error",
 			ID:      req.ID,
 			Error:   "duplicate_job_id",
 			Message: "Job is already in progress",
-		})
+		}); err != nil {
+			return fmt.Errorf("write duplicate fetch error: %w", err)
+		}
 		c.emitJobResult(false, 0)
 		return nil
 	}
@@ -264,12 +281,14 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 	})
 	if err != nil {
 		code, msg := mapFetchError(err, timeoutMS)
-		_ = c.writeJSON(ctx, conn, FetchError{
+		if err := c.writeJSON(ctx, conn, FetchError{
 			Type:    "fetch_error",
 			ID:      req.ID,
 			Error:   code,
 			Message: msg,
-		})
+		}); err != nil {
+			return fmt.Errorf("write fetch error: %w", err)
+		}
 		c.emitJobResult(false, 0)
 		return nil
 	}

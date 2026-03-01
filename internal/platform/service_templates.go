@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 )
 
 const (
@@ -35,6 +36,7 @@ func LaunchdPlist(homeDir string) string {
 
 // SystemdUserUnit renders a systemd user unit for foreground daemon mode.
 func SystemdUserUnit(homeDir string) string {
+	execPath := filepath.Join(homeDir, ".distil-proxy/bin/distil-proxy")
 	return fmt.Sprintf(`[Unit]
 Description=Distil Proxy Daemon
 After=network-online.target
@@ -46,7 +48,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, filepath.Join(homeDir, ".distil-proxy/bin/distil-proxy"))
+`, strconv.Quote(execPath))
 }
 
 // InstallServiceDefinition writes and enables the local service definition.

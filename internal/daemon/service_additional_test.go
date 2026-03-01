@@ -108,13 +108,41 @@ func TestStartWritesStatusAndPreventsDuplicate(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return "sh", nil
+		return "/bin/sh __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
 	err = Start(paths, cfg)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("expected already running error, got %v", err)
+	}
+}
+
+func TestStartDetachesChildSession(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	cfg := testConfig()
+
+	origExecPath := execPathFunc
+	origExecCmd := execCmdFunc
+	var startedCmd *exec.Cmd
+	execPathFunc = func() (string, error) { return "/bin/sh", nil }
+	execCmdFunc = func(_ string, _ ...string) *exec.Cmd {
+		startedCmd = exec.Command("sh", "-c", "sleep 30")
+		return startedCmd
+	}
+	defer func() {
+		execPathFunc = origExecPath
+		execCmdFunc = origExecCmd
+	}()
+
+	if err := Start(paths, cfg); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	if startedCmd == nil || startedCmd.SysProcAttr == nil || !startedCmd.SysProcAttr.Setsid {
+		t.Fatalf("expected daemon child to run in detached session, got %+v", startedCmd)
+	}
+	if startedCmd.Process != nil {
+		terminateProcess(startedCmd.Process)
 	}
 }
 
@@ -312,7 +340,7 @@ func TestStartForegroundDetectsExistingDaemon(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -402,7 +430,7 @@ func TestStopRunningProcess(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -637,9 +665,326 @@ func TestDaemonOwnsPIDBranches(t *testing.T) {
 		t.Fatal("expected name mismatch to reject ownership")
 	}
 
-	processNameFn = func(_ int) (string, error) { return "distil-proxy", nil }
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy __run", nil }
 	if !daemonOwnsPID(os.Getpid()) {
-		t.Fatal("expected basename match to accept ownership")
+		t.Fatal("expected daemon __run invocation to accept ownership")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy start --foreground", nil }
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected foreground daemon invocation to accept ownership")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy auth dk_test", nil }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected non-daemon CLI invocation to be rejected")
+	}
+
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy-other --foreground", nil }
+	if daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected executable prefix collisions to be rejected")
+	}
+}
+
+func TestDaemonOwnsPIDAcceptsSymlinkedExecutablePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	expectedAlias := filepath.Join(tmpDir, "distil-proxy-alias-a")
+	processAlias := filepath.Join(tmpDir, "distil-proxy-alias-b")
+	if err := os.Symlink(realBinary, expectedAlias); err != nil {
+		t.Fatalf("symlink expected alias: %v", err)
+	}
+	if err := os.Symlink(realBinary, processAlias); err != nil {
+		t.Fatalf("symlink process alias: %v", err)
+	}
+
+	origExecPath := execPathFunc
+	origProcessName := processNameFn
+	execPathFunc = func() (string, error) { return expectedAlias, nil }
+	processNameFn = func(_ int) (string, error) { return `"` + processAlias + `" __run`, nil }
+	defer func() {
+		execPathFunc = origExecPath
+		processNameFn = origProcessName
+	}()
+
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected symlink aliases of the same binary to be treated as daemon ownership")
+	}
+}
+
+func TestDaemonOwnsPIDAcceptsUnquotedExecutableWithSpaces(t *testing.T) {
+	tmpDir := filepath.Join(t.TempDir(), "home with spaces")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatalf("mkdir temp dir with spaces: %v", err)
+	}
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	expectedAlias := filepath.Join(tmpDir, "distil proxy alias a")
+	processAlias := filepath.Join(tmpDir, "distil proxy alias b")
+	if err := os.Symlink(realBinary, expectedAlias); err != nil {
+		t.Fatalf("symlink expected alias: %v", err)
+	}
+	if err := os.Symlink(realBinary, processAlias); err != nil {
+		t.Fatalf("symlink process alias: %v", err)
+	}
+
+	origExecPath := execPathFunc
+	origProcessName := processNameFn
+	execPathFunc = func() (string, error) { return expectedAlias, nil }
+	processNameFn = func(_ int) (string, error) { return processAlias + " __run", nil }
+	defer func() {
+		execPathFunc = origExecPath
+		processNameFn = origProcessName
+	}()
+
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected unquoted command paths with spaces to be matched by daemon ownership checks")
+	}
+}
+
+func TestCommandExecutablePathParsing(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{name: "empty", input: "", want: "", wantOK: false},
+		{name: "single-token", input: "/tmp/distil-proxy", want: "/tmp/distil-proxy", wantOK: true},
+		{name: "with-args", input: "/tmp/distil-proxy __run", want: "/tmp/distil-proxy", wantOK: true},
+		{name: "double-quoted", input: `"/tmp/with spaces/distil-proxy" __run`, want: "/tmp/with spaces/distil-proxy", wantOK: true},
+		{name: "double-quoted-escaped", input: `"/tmp/distil-proxy\"quoted\"" __run`, want: `/tmp/distil-proxy"quoted"`, wantOK: true},
+		{name: "single-quoted", input: `'/tmp/with spaces/distil-proxy' __run`, want: "/tmp/with spaces/distil-proxy", wantOK: true},
+		{name: "unterminated-quote", input: `"/tmp/distil-proxy`, want: "", wantOK: false},
+		{name: "empty-quoted", input: `"" __run`, want: "", wantOK: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := commandExecutablePath(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
+			}
+			if got != tc.want {
+				t.Fatalf("expected executable %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCommandMatchesExecutableUsesSameFileIdentity(t *testing.T) {
+	tmpDir := t.TempDir()
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	hardLinkBinary := filepath.Join(tmpDir, "distil-proxy-hardlink")
+	if err := os.Link(realBinary, hardLinkBinary); err != nil {
+		t.Fatalf("create hard link: %v", err)
+	}
+
+	if !commandMatchesExecutable(hardLinkBinary+" __run", realBinary) {
+		t.Fatal("expected hard-linked executable paths to match by file identity")
+	}
+}
+
+func TestCommandMatchesExecutableNormalizesRelativeForegroundPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	expectedPath := filepath.Join(binDir, "distil-proxy")
+	if err := os.WriteFile(expectedPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write expected executable: %v", err)
+	}
+
+	if !commandMatchesExecutable("./distil-proxy start --foreground", expectedPath) {
+		t.Fatal("expected relative foreground command path to match expected executable")
+	}
+	if !commandMatchesExecutable("distil-proxy start --foreground", expectedPath) {
+		t.Fatal("expected bare foreground command path to match expected executable")
+	}
+}
+
+func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
+	if commandMatchesExecutable("command", "   ") {
+		t.Fatal("expected blank expectedPath to be rejected")
+	}
+	if commandMatchesExecutable(`"/tmp/unclosed`, "/tmp/distil-proxy") {
+		t.Fatal("expected malformed quoted command line to be rejected")
+	}
+	if commandMatchesExecutable("/tmp/distil-proxy start", "/tmp/distil-proxy") {
+		t.Fatal("expected start command without --foreground to be rejected")
+	}
+	if commandMatchesExecutable("/tmp/distil-proxy auth", "/tmp/distil-proxy") {
+		t.Fatal("expected non-daemon command line to be rejected")
+	}
+	if normalized, ok := normalizeRelativeCommandPath("/tmp/distil-proxy", "/tmp/expected"); ok || normalized != "" {
+		t.Fatal("expected absolute command path to skip relative normalization")
+	}
+	if normalized, ok := normalizeRelativeCommandPath("./distil-proxy", "   "); ok || normalized != "" {
+		t.Fatal("expected blank expected path to skip relative normalization")
+	}
+}
+
+func TestCommandExecutableForDaemonRun(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "unquoted-path-with-spaces",
+			input:  "/tmp/home with spaces/distil-proxy __run",
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "quoted-path-with-spaces",
+			input:  `"/tmp/home with spaces/distil-proxy" __run`,
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "extra-args-after-run",
+			input:  "/tmp/distil-proxy __run extra",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "missing-run-arg",
+			input:  "/tmp/distil-proxy --foreground",
+			want:   "",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := commandExecutableForDaemonRun(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
+			}
+			if got != tc.want {
+				t.Fatalf("expected executable %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCommandExecutableForForegroundStart(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "standard-foreground",
+			input:  "/tmp/distil-proxy start --foreground",
+			want:   "/tmp/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "foreground-equals-true",
+			input:  "/tmp/distil-proxy start --foreground=true",
+			want:   "/tmp/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "unquoted-path-with-spaces",
+			input:  "/tmp/home with spaces/distil-proxy start --foreground",
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "quoted-path-with-spaces",
+			input:  `"/tmp/home with spaces/distil-proxy" start --foreground`,
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "missing-foreground-flag",
+			input:  "/tmp/distil-proxy start",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "wrong-command",
+			input:  "/tmp/distil-proxy status",
+			want:   "",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := commandExecutableForForegroundStart(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
+			}
+			if got != tc.want {
+				t.Fatalf("expected executable %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestExecutableIdentityBranches(t *testing.T) {
+	if _, _, err := executableIdentity("   "); err == nil {
+		t.Fatal("expected empty path error")
+	}
+
+	if _, _, err := executableIdentity(filepath.Join(t.TempDir(), "missing-binary")); err == nil {
+		t.Fatal("expected stat error for missing path")
+	}
+
+	tmpDir := t.TempDir()
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	aliasPath := filepath.Join(tmpDir, "distil-proxy-alias")
+	if err := os.Symlink(realBinary, aliasPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	resolved, info, err := executableIdentity(aliasPath)
+	if err != nil {
+		t.Fatalf("resolve executable identity: %v", err)
+	}
+	expectedResolved, err := filepath.EvalSymlinks(realBinary)
+	if err != nil {
+		t.Fatalf("resolve expected path: %v", err)
+	}
+	if resolved != expectedResolved {
+		t.Fatalf("expected resolved path %q, got %q", expectedResolved, resolved)
+	}
+	if info == nil {
+		t.Fatal("expected file info from executable identity")
+	}
+}
+
+func TestDetachProcessSessionBranches(t *testing.T) {
+	detachProcessSession(nil)
+
+	cmd := &exec.Cmd{}
+	detachProcessSession(cmd)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatalf("expected Setsid to be enabled on command, got %+v", cmd.SysProcAttr)
+	}
+
+	cmdWithAttr := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{}}
+	detachProcessSession(cmdWithAttr)
+	if !cmdWithAttr.SysProcAttr.Setsid {
+		t.Fatalf("expected existing SysProcAttr to be updated with Setsid, got %+v", cmdWithAttr.SysProcAttr)
 	}
 }
 
@@ -723,6 +1068,30 @@ func TestReadLogTailBranches(t *testing.T) {
 	}
 	if len(lines) != 0 {
 		t.Fatalf("expected no lines, got %#v", lines)
+	}
+}
+
+func TestReadLogTailHandlesLongLines(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+
+	longLine := strings.Repeat("x", 32*1024)
+	content := longLine + "\nlast-line\n"
+	if err := os.WriteFile(paths.LogFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+
+	lines, err := ReadLogTail(paths, 2)
+	if err != nil {
+		t.Fatalf("read tail with long lines: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %#v", lines)
+	}
+	if lines[0] != longLine || lines[1] != "last-line" {
+		t.Fatalf("unexpected tail lines: %#v", lines)
 	}
 }
 
@@ -928,7 +1297,7 @@ func TestStopTimeout(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -944,6 +1313,62 @@ func TestStopTimeout(t *testing.T) {
 	err = Stop(paths)
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
 		t.Fatalf("expected timeout stop error, got %v", err)
+	}
+}
+
+func TestStopTreatsOwnershipChangeDuringWaitAsStopped(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, 4242); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	ownershipChecks := 0
+	processNameFn = func(_ int) (string, error) {
+		ownershipChecks++
+		if ownershipChecks == 1 {
+			return expectedPath + " __run", nil
+		}
+		return "pid-reused-by-other-process", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	origKill := killFunc
+	killCalls := 0
+	killFunc = func(_ int, sig syscall.Signal) error {
+		killCalls++
+		if sig == 0 || sig == syscall.SIGTERM {
+			return nil
+		}
+		t.Fatalf("unexpected signal in test: %v", sig)
+		return nil
+	}
+	defer func() { killFunc = origKill }()
+
+	origTimeout := stopTimeout
+	origPoll := stopPoll
+	stopTimeout = 5 * time.Second
+	stopPoll = 5 * time.Millisecond
+	defer func() {
+		stopTimeout = origTimeout
+		stopPoll = origPoll
+	}()
+
+	if err := Stop(paths); err != nil {
+		t.Fatalf("expected ownership change to be treated as stopped, got %v", err)
+	}
+	if killCalls < 2 {
+		t.Fatalf("expected process probe + SIGTERM calls, got %d", killCalls)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file removed, err=%v", statErr)
 	}
 }
 
@@ -1002,7 +1427,7 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	}
 	origProcessName := processNameFn
 	processNameFn = func(_ int) (string, error) {
-		return filepath.Base(expectedPath), nil
+		return expectedPath + " __run", nil
 	}
 	defer func() { processNameFn = origProcessName }()
 
@@ -1018,6 +1443,57 @@ func TestStopSignalErrorWithInjectedKill(t *testing.T) {
 	err = Stop(paths)
 	if err == nil || !strings.Contains(err.Error(), "signal daemon pid") {
 		t.Fatalf("expected signal error, got %v", err)
+	}
+}
+
+func TestStopTreatsSIGTERMESRCHAsStopped(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	pid := os.Getpid()
+	if err := writePID(paths, pid); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: pid, Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return expectedPath + " __run", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	origKill := killFunc
+	killFunc = func(_ int, sig syscall.Signal) error {
+		if sig == 0 {
+			return nil
+		}
+		if sig == syscall.SIGTERM {
+			return syscall.ESRCH
+		}
+		t.Fatalf("unexpected signal: %v", sig)
+		return nil
+	}
+	defer func() { killFunc = origKill }()
+
+	if err := Stop(paths); err != nil {
+		t.Fatalf("expected ESRCH on SIGTERM to be treated as stopped, got %v", err)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected pid file removed after ESRCH, err=%v", statErr)
+	}
+	status, err := readStatus(paths)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status.Running || status.WSState != "stopped" {
+		t.Fatalf("expected stopped status after ESRCH race, got %+v", status)
 	}
 }
 
@@ -1039,6 +1515,96 @@ func TestStatusDefaultsWhenNoPIDAndEmptyStatus(t *testing.T) {
 	}
 	if status.UpdatedAt.IsZero() {
 		t.Fatalf("expected updated_at to be set: %+v", status)
+	}
+}
+
+func TestStatusPreservesUptimeWhenStopped(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+
+	const persistedUptime = int64(123)
+	stoppedStatus := RuntimeStatus{
+		Running:       false,
+		WSState:       "stopped",
+		StartedAt:     time.Now().UTC().Add(-2 * time.Hour),
+		UpdatedAt:     time.Now().UTC().Add(-10 * time.Minute),
+		UptimeSeconds: persistedUptime,
+	}
+	if err := writeStatus(paths, stoppedStatus); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	status, err := Status(paths)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Running {
+		t.Fatalf("expected stopped status, got %+v", status)
+	}
+	if status.UptimeSeconds != persistedUptime {
+		t.Fatalf("expected persisted uptime %d, got %d", persistedUptime, status.UptimeSeconds)
+	}
+}
+
+func TestStatusRejectsPIDOwnershipMismatch(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, os.Getpid()); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: os.Getpid(), Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return "unrelated-process", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
+	status, err := Status(paths)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Running {
+		t.Fatalf("expected status to report not running for ownership mismatch: %+v", status)
+	}
+	if status.WSState != "stopped" {
+		t.Fatalf("expected ws_state=stopped for ownership mismatch, got %+v", status)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file removed, err=%v", statErr)
+	}
+}
+
+func TestStatusForcesStoppedStateWhenPIDNotRunning(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := writePID(paths, 999999); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := writeStatus(paths, RuntimeStatus{PID: 999999, Running: true, WSState: "connected"}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	status, err := Status(paths)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Running {
+		t.Fatalf("expected status to report not running for dead pid: %+v", status)
+	}
+	if status.WSState != "stopped" {
+		t.Fatalf("expected ws_state=stopped for dead pid, got %+v", status)
+	}
+	if _, statErr := os.Stat(paths.PIDFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected stale pid file removed, err=%v", statErr)
 	}
 }
 
@@ -1073,15 +1639,12 @@ func TestReadLogTailReadError(t *testing.T) {
 	if err := config.EnsureStateDirs(paths); err != nil {
 		t.Fatalf("ensure dirs: %v", err)
 	}
-	if err := os.WriteFile(paths.LogFile, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write log file: %v", err)
+	if err := os.Remove(paths.LogFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove log file: %v", err)
 	}
-
-	origReadAll := readAllFunc
-	readAllFunc = func(io.Reader) ([]byte, error) {
-		return nil, errors.New("read failed")
+	if err := os.Mkdir(paths.LogFile, 0o700); err != nil {
+		t.Fatalf("create directory at log path: %v", err)
 	}
-	defer func() { readAllFunc = origReadAll }()
 
 	_, err := ReadLogTail(paths, 10)
 	if err == nil || !strings.Contains(err.Error(), "read log file") {
@@ -1440,12 +2003,27 @@ func TestStatusAndReadLogTailAdditionalCoverage(t *testing.T) {
 		if err := config.EnsureStateDirs(paths); err != nil {
 			t.Fatalf("ensure dirs: %v", err)
 		}
+		if err := writePID(paths, os.Getpid()); err != nil {
+			t.Fatalf("write pid: %v", err)
+		}
+
+		expectedPath, err := execPathFunc()
+		if err != nil {
+			t.Fatalf("resolve executable path: %v", err)
+		}
+		origProcessName := processNameFn
+		processNameFn = func(_ int) (string, error) {
+			return expectedPath + " __run", nil
+		}
+		defer func() { processNameFn = origProcessName }()
+
 		status := RuntimeStatus{
 			WSState:    "connected",
+			Running:    true,
 			StartedAt:  time.Now().UTC().Add(-2 * time.Second),
 			UpdatedAt:  time.Now().UTC(),
 			LastError:  "",
-			PID:        0,
+			PID:        os.Getpid(),
 			JobsServed: 1,
 		}
 		if err := writeStatus(paths, status); err != nil {

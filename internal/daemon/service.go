@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/exec-io/distil-proxy/internal/config"
 	"github.com/exec-io/distil-proxy/internal/fetch"
@@ -36,11 +39,10 @@ var (
 	stopPoll         = 200 * time.Millisecond
 	statusTick       = 5 * time.Second
 	killFunc         = syscall.Kill
-	readAllFunc      = io.ReadAll
 	marshalStatus    = json.MarshalIndent
 	processNameFn    = processNameByPID
 	processLookupCmd = func(pid int) *exec.Cmd {
-		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
 	}
 	exitFunc              = os.Exit
 	upgradeManagerFactory = newUpgradeManager
@@ -105,6 +107,7 @@ func Start(paths config.Paths, cfg config.Config) error {
 	defer logFile.Close()
 
 	cmd := execCmdFunc(execPath, "__run")
+	detachProcessSession(cmd)
 	cmd.Env = append(os.Environ(), "DISTIL_PROXY_DAEMON=1")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -268,21 +271,23 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 		return err
 	}
 
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
 	ticker := time.NewTicker(statusTick)
 	defer ticker.Stop()
+	tickerDone := make(chan struct{})
 	go func() {
+		defer close(tickerDone)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-ticker.C:
 				updateStatus(func(_ *RuntimeStatus) {})
 			}
 		}
 	}()
-
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
 
 	var upgradeRequested atomic.Bool
 	if upgrader != nil {
@@ -316,6 +321,8 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 	}
 
 	runErr := runClientWithRecovery(runCtx, client)
+	runCancel()
+	<-tickerDone
 	if upgradeRequested.Load() {
 		return restartProcess()
 	}
@@ -428,12 +435,19 @@ func Stop(paths config.Paths) error {
 	}
 
 	if err := killFunc(pid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			if err := removePID(paths); err != nil {
+				return err
+			}
+			markStopped(paths, pid, "stopped")
+			return nil
+		}
 		return fmt.Errorf("signal daemon pid %d: %w", pid, err)
 	}
 
 	deadline := time.Now().Add(stopTimeout)
 	for {
-		if !processRunning(pid) {
+		if !processRunning(pid) || !daemonOwnsPID(pid) {
 			if err := removePID(paths); err != nil {
 				return err
 			}
@@ -470,17 +484,19 @@ func Status(paths config.Paths) (RuntimeStatus, error) {
 	pid, err := readPID(paths)
 	if err == nil {
 		status.PID = pid
-		status.Running = processRunning(pid)
-	} else if errors.Is(err, os.ErrNotExist) {
-		status.Running = false
-		if status.WSState == "" {
+		status.Running = processRunning(pid) && daemonOwnsPID(pid)
+		if !status.Running {
+			_ = removePID(paths)
 			status.WSState = "stopped"
 		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		status.Running = false
+		status.WSState = "stopped"
 	} else {
 		return RuntimeStatus{}, err
 	}
 
-	if !status.StartedAt.IsZero() {
+	if status.Running && !status.StartedAt.IsZero() {
 		status.UptimeSeconds = int64(time.Since(status.StartedAt).Seconds())
 	}
 	if status.UpdatedAt.IsZero() {
@@ -536,15 +552,51 @@ func daemonOwnsPID(pid int) bool {
 	if err != nil {
 		return false
 	}
-	expectedName := filepath.Base(strings.TrimSpace(execPath))
-	if expectedName == "" {
+	expectedPath := strings.TrimSpace(execPath)
+	if expectedPath == "" {
 		return false
 	}
-	processName, err := processNameFn(pid)
+	processCommand, err := processNameFn(pid)
 	if err != nil {
 		return false
 	}
-	return filepath.Base(strings.TrimSpace(processName)) == expectedName
+	return commandMatchesExecutable(processCommand, expectedPath)
+}
+
+func commandMatchesExecutable(commandLine, expectedPath string) bool {
+	commandLine = strings.TrimSpace(commandLine)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if commandLine == "" || expectedPath == "" {
+		return false
+	}
+
+	candidates := make([]string, 0, 2)
+	if commandPath, ok := commandExecutableForDaemonRun(commandLine); ok {
+		candidates = append(candidates, commandPath)
+	}
+	if commandPath, ok := commandExecutableForForegroundStart(commandLine); ok {
+		candidates = append(candidates, commandPath)
+	}
+	for _, commandPath := range candidates {
+		if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
+			return true
+		}
+		if normalized, ok := normalizeRelativeCommandPath(commandPath, expectedPath); ok {
+			if normalized == expectedPath || sameExecutableFile(normalized, expectedPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeRelativeCommandPath(commandPath, expectedPath string) (string, bool) {
+	commandPath = strings.TrimSpace(commandPath)
+	expectedPath = strings.TrimSpace(expectedPath)
+	if commandPath == "" || expectedPath == "" || filepath.IsAbs(commandPath) {
+		return "", false
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(expectedPath), commandPath)), true
 }
 
 func processNameByPID(pid int) (string, error) {
@@ -558,6 +610,154 @@ func processNameByPID(pid int) (string, error) {
 		return "", errors.New("empty process name")
 	}
 	return name, nil
+}
+
+func commandExecutablePath(commandLine string) (string, bool) {
+	commandLine = strings.TrimSpace(commandLine)
+	if commandLine == "" {
+		return "", false
+	}
+	if commandLine[0] == '"' || commandLine[0] == '\'' {
+		return quotedExecutablePath(commandLine)
+	}
+	if idx := strings.IndexFunc(commandLine, unicode.IsSpace); idx >= 0 {
+		return commandLine[:idx], true
+	}
+	return commandLine, true
+}
+
+func commandExecutableForDaemonRun(commandLine string) (string, bool) {
+	commandLine = strings.TrimSpace(commandLine)
+	if commandLine == "" {
+		return "", false
+	}
+
+	const daemonRunArg = "__run"
+	idx := strings.LastIndex(commandLine, daemonRunArg)
+	if idx <= 0 {
+		return "", false
+	}
+	if strings.TrimSpace(commandLine[idx+len(daemonRunArg):]) != "" {
+		return "", false
+	}
+
+	rawPrefix := commandLine[:idx]
+	lastRune, _ := utf8.DecodeLastRuneInString(rawPrefix)
+	if !unicode.IsSpace(lastRune) {
+		return "", false
+	}
+	commandPath := strings.TrimSpace(rawPrefix)
+	if unquoted, ok := unquotePath(commandPath); ok {
+		commandPath = unquoted
+	}
+	if commandPath == "" {
+		return "", false
+	}
+	return commandPath, true
+}
+
+func commandExecutableForForegroundStart(commandLine string) (string, bool) {
+	commandLine = strings.TrimSpace(commandLine)
+	if commandLine == "" {
+		return "", false
+	}
+
+	suffixes := []string{
+		" start --foreground",
+		" start --foreground=true",
+	}
+	for _, suffix := range suffixes {
+		if !strings.HasSuffix(commandLine, suffix) {
+			continue
+		}
+		commandPath := strings.TrimSpace(strings.TrimSuffix(commandLine, suffix))
+		if unquoted, ok := unquotePath(commandPath); ok {
+			commandPath = unquoted
+		}
+		if commandPath == "" {
+			return "", false
+		}
+		return commandPath, true
+	}
+
+	return "", false
+}
+
+func quotedExecutablePath(commandLine string) (string, bool) {
+	quote := commandLine[0]
+	var builder strings.Builder
+	escaped := false
+	for i := 1; i < len(commandLine); i++ {
+		ch := commandLine[i]
+		if quote == '"' && ch == '\\' && !escaped {
+			escaped = true
+			continue
+		}
+		if escaped {
+			builder.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == quote {
+			if builder.Len() == 0 {
+				return "", false
+			}
+			return builder.String(), true
+		}
+		builder.WriteByte(ch)
+	}
+	return "", false
+}
+
+func unquotePath(path string) (string, bool) {
+	if len(path) < 2 {
+		return "", false
+	}
+	quote := path[0]
+	if (quote != '"' && quote != '\'') || path[len(path)-1] != quote {
+		return "", false
+	}
+	return path[1 : len(path)-1], true
+}
+
+func executableIdentity(path string) (string, os.FileInfo, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || cleaned == "." {
+		return "", nil, errors.New("empty executable path")
+	}
+
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		resolved = cleaned
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", nil, err
+	}
+	return resolved, info, nil
+}
+
+func sameExecutableFile(pathA, pathB string) bool {
+	resolvedA, infoA, errA := executableIdentity(pathA)
+	resolvedB, infoB, errB := executableIdentity(pathB)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if resolvedA == resolvedB {
+		return true
+	}
+	return os.SameFile(infoA, infoB)
+}
+
+func detachProcessSession(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
 }
 
 func terminateProcess(proc *os.Process) {
@@ -660,20 +860,55 @@ func ReadLogTail(paths config.Paths, n int) ([]string, error) {
 	}
 	defer f.Close()
 
-	content, err := readAllFunc(f)
-	if err != nil {
-		return nil, fmt.Errorf("read log file: %w", err)
+	lines := make([]string, n)
+	count := 0
+	reader := bufio.NewReader(f)
+	var lineBuilder strings.Builder
+	for {
+		chunk, isPrefix, err := reader.ReadLine()
+		if len(chunk) > 0 {
+			_, _ = lineBuilder.Write(chunk)
+		}
+		if err == nil && isPrefix {
+			continue
+		}
+		if err == nil {
+			lines[count%n] = lineBuilder.String()
+			count++
+			lineBuilder.Reset()
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if lineBuilder.Len() > 0 {
+				lines[count%n] = lineBuilder.String()
+				count++
+			}
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read log file: %w", err)
+		}
 	}
 
-	text := strings.TrimRight(string(content), "\n")
-	if text == "" {
+	if count == 0 {
 		return []string{}, nil
 	}
 
-	lines := strings.Split(text, "\n")
-	if len(lines) <= n {
-		return lines, nil
+	if count <= n {
+		return trimTrailingEmptyLogLines(append([]string(nil), lines[:count]...)), nil
 	}
 
-	return lines[len(lines)-n:], nil
+	tail := make([]string, n)
+	start := count % n
+	for i := 0; i < n; i++ {
+		tail[i] = lines[(start+i)%n]
+	}
+	return trimTrailingEmptyLogLines(tail), nil
+}
+
+func trimTrailingEmptyLogLines(lines []string) []string {
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }

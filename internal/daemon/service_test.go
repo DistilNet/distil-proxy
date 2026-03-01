@@ -84,6 +84,16 @@ func TestStatusReflectsRunningPID(t *testing.T) {
 		t.Fatalf("write pid: %v", err)
 	}
 
+	expectedPath, err := execPathFunc()
+	if err != nil {
+		t.Fatalf("resolve executable path: %v", err)
+	}
+	origProcessName := processNameFn
+	processNameFn = func(_ int) (string, error) {
+		return expectedPath + " __run", nil
+	}
+	defer func() { processNameFn = origProcessName }()
+
 	status, err := Status(paths)
 	if err != nil {
 		t.Fatalf("status error: %v", err)
