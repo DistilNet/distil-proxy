@@ -663,7 +663,7 @@ func TestDaemonOwnsPIDAcceptsSymlinkedExecutablePaths(t *testing.T) {
 	origExecPath := execPathFunc
 	origProcessName := processNameFn
 	execPathFunc = func() (string, error) { return expectedAlias, nil }
-	processNameFn = func(_ int) (string, error) { return processAlias + " __run", nil }
+	processNameFn = func(_ int) (string, error) { return `"` + processAlias + `" __run`, nil }
 	defer func() {
 		execPathFunc = origExecPath
 		processNameFn = origProcessName
@@ -671,6 +671,102 @@ func TestDaemonOwnsPIDAcceptsSymlinkedExecutablePaths(t *testing.T) {
 
 	if !daemonOwnsPID(os.Getpid()) {
 		t.Fatal("expected symlink aliases of the same binary to be treated as daemon ownership")
+	}
+}
+
+func TestCommandExecutablePathParsing(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{name: "empty", input: "", want: "", wantOK: false},
+		{name: "single-token", input: "/tmp/distil-proxy", want: "/tmp/distil-proxy", wantOK: true},
+		{name: "with-args", input: "/tmp/distil-proxy __run", want: "/tmp/distil-proxy", wantOK: true},
+		{name: "double-quoted", input: `"/tmp/with spaces/distil-proxy" __run`, want: "/tmp/with spaces/distil-proxy", wantOK: true},
+		{name: "single-quoted", input: `'/tmp/with spaces/distil-proxy' __run`, want: "/tmp/with spaces/distil-proxy", wantOK: true},
+		{name: "unterminated-quote", input: `"/tmp/distil-proxy`, want: "", wantOK: false},
+		{name: "empty-quoted", input: `"" __run`, want: "", wantOK: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := commandExecutablePath(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
+			}
+			if got != tc.want {
+				t.Fatalf("expected executable %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCommandMatchesExecutableUsesSameFileIdentity(t *testing.T) {
+	tmpDir := t.TempDir()
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	hardLinkBinary := filepath.Join(tmpDir, "distil-proxy-hardlink")
+	if err := os.Link(realBinary, hardLinkBinary); err != nil {
+		t.Fatalf("create hard link: %v", err)
+	}
+
+	if !commandMatchesExecutable(hardLinkBinary+" __run", realBinary) {
+		t.Fatal("expected hard-linked executable paths to match by file identity")
+	}
+}
+
+func TestExecutableIdentityBranches(t *testing.T) {
+	if _, _, err := executableIdentity("   "); err == nil {
+		t.Fatal("expected empty path error")
+	}
+
+	if _, _, err := executableIdentity(filepath.Join(t.TempDir(), "missing-binary")); err == nil {
+		t.Fatal("expected stat error for missing path")
+	}
+
+	tmpDir := t.TempDir()
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	aliasPath := filepath.Join(tmpDir, "distil-proxy-alias")
+	if err := os.Symlink(realBinary, aliasPath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	resolved, info, err := executableIdentity(aliasPath)
+	if err != nil {
+		t.Fatalf("resolve executable identity: %v", err)
+	}
+	expectedResolved, err := filepath.EvalSymlinks(realBinary)
+	if err != nil {
+		t.Fatalf("resolve expected path: %v", err)
+	}
+	if resolved != expectedResolved {
+		t.Fatalf("expected resolved path %q, got %q", expectedResolved, resolved)
+	}
+	if info == nil {
+		t.Fatal("expected file info from executable identity")
+	}
+}
+
+func TestDetachProcessSessionBranches(t *testing.T) {
+	detachProcessSession(nil)
+
+	cmd := &exec.Cmd{}
+	detachProcessSession(cmd)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatalf("expected Setsid to be enabled on command, got %+v", cmd.SysProcAttr)
+	}
+
+	cmdWithAttr := &exec.Cmd{SysProcAttr: &syscall.SysProcAttr{}}
+	detachProcessSession(cmdWithAttr)
+	if !cmdWithAttr.SysProcAttr.Setsid {
+		t.Fatalf("expected existing SysProcAttr to be updated with Setsid, got %+v", cmdWithAttr.SysProcAttr)
 	}
 }
 
