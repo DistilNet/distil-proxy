@@ -1716,54 +1716,50 @@ func TestRestartProcessBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("start-error", func(t *testing.T) {
+	t.Run("exec-replace-error", func(t *testing.T) {
 		origExecPath := execPathFunc
-		origExecCmd := execCmdFunc
+		origExecReplace := execReplaceFunc
 		execPathFunc = func() (string, error) { return "/bin/sh", nil }
-		execCmdFunc = func(_ string, _ ...string) *exec.Cmd { return exec.Command("/definitely/missing-binary") }
+		execReplaceFunc = func(string, []string, []string) error { return errors.New("exec failed") }
 		defer func() {
 			execPathFunc = origExecPath
-			execCmdFunc = origExecCmd
+			execReplaceFunc = origExecReplace
 		}()
 
 		if err := restartProcess(); err == nil || !strings.Contains(err.Error(), "restart process") {
-			t.Fatalf("expected restart start error, got %v", err)
+			t.Fatalf("expected restart exec error, got %v", err)
 		}
 	})
 
-	t.Run("success-calls-exit", func(t *testing.T) {
+	t.Run("success-execs-runtime", func(t *testing.T) {
 		origExecPath := execPathFunc
-		origExecCmd := execCmdFunc
-		origExit := exitFunc
-		origArgs := os.Args
+		origExecReplace := execReplaceFunc
 		execPathFunc = func() (string, error) { return "/bin/sh", nil }
+		var capturedPath string
 		var capturedArgs []string
-		execCmdFunc = func(_ string, args ...string) *exec.Cmd {
+		var capturedEnv []string
+		execReplaceFunc = func(path string, args []string, env []string) error {
+			capturedPath = path
 			capturedArgs = append([]string(nil), args...)
-			return exec.Command("sh", "-c", "true")
-		}
-		os.Args = []string{"distil-proxy", "start", "--foreground"}
-		var exitCode int
-		exitCalls := 0
-		exitFunc = func(code int) {
-			exitCode = code
-			exitCalls++
+			capturedEnv = append([]string(nil), env...)
+			return nil
 		}
 		defer func() {
 			execPathFunc = origExecPath
-			execCmdFunc = origExecCmd
-			exitFunc = origExit
-			os.Args = origArgs
+			execReplaceFunc = origExecReplace
 		}()
 
 		if err := restartProcess(); err != nil {
 			t.Fatalf("expected restart success, got %v", err)
 		}
-		if len(capturedArgs) != 1 || capturedArgs[0] != "__run" {
-			t.Fatalf("expected restart to execute __run, got args=%v", capturedArgs)
+		if capturedPath != "/bin/sh" {
+			t.Fatalf("expected restart path /bin/sh, got %q", capturedPath)
 		}
-		if exitCalls != 1 || exitCode != 0 {
-			t.Fatalf("expected exit(0) once, calls=%d code=%d", exitCalls, exitCode)
+		if len(capturedArgs) != 2 || capturedArgs[0] != "/bin/sh" || capturedArgs[1] != "__run" {
+			t.Fatalf("expected restart to exec [/bin/sh __run], got args=%v", capturedArgs)
+		}
+		if len(capturedEnv) == 0 {
+			t.Fatal("expected restart exec environment to be forwarded")
 		}
 	})
 }
@@ -1842,22 +1838,22 @@ func TestRunAutoUpgradeStartupPaths(t *testing.T) {
 
 		origFactory := clientFactory
 		origExecPath := execPathFunc
-		origExecCmd := execCmdFunc
-		origExit := exitFunc
+		origExecReplace := execReplaceFunc
 		clientCalled := false
-		exitCalled := false
+		restartExecCalled := false
 		clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
 			clientCalled = true
 			return fakeRunner{run: func(context.Context) error { return nil }}, nil
 		}
 		execPathFunc = func() (string, error) { return execPath, nil }
-		execCmdFunc = func(_ string, _ ...string) *exec.Cmd { return exec.Command("sh", "-c", "true") }
-		exitFunc = func(int) { exitCalled = true }
+		execReplaceFunc = func(path string, args []string, env []string) error {
+			restartExecCalled = true
+			return nil
+		}
 		defer func() {
 			clientFactory = origFactory
 			execPathFunc = origExecPath
-			execCmdFunc = origExecCmd
-			exitFunc = origExit
+			execReplaceFunc = origExecReplace
 		}()
 
 		cfg := testConfig()
@@ -1870,8 +1866,8 @@ func TestRunAutoUpgradeStartupPaths(t *testing.T) {
 		if clientCalled {
 			t.Fatal("expected websocket client not to be created during rollback restart path")
 		}
-		if !exitCalled {
-			t.Fatal("expected restart path to invoke exit function")
+		if !restartExecCalled {
+			t.Fatal("expected restart path to exec replacement process")
 		}
 
 		installed, err := os.ReadFile(execPath)
@@ -1940,14 +1936,12 @@ func TestRunAutoUpgradeTickerBranchesAndRestart(t *testing.T) {
 	origFactory := clientFactory
 	origUpgraderFactory := upgradeManagerFactory
 	origExecPath := execPathFunc
-	origExecCmd := execCmdFunc
-	origExit := exitFunc
+	origExecReplace := execReplaceFunc
 	defer func() {
 		clientFactory = origFactory
 		upgradeManagerFactory = origUpgraderFactory
 		execPathFunc = origExecPath
-		execCmdFunc = origExecCmd
-		exitFunc = origExit
+		execReplaceFunc = origExecReplace
 	}()
 
 	clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
@@ -1970,9 +1964,11 @@ func TestRunAutoUpgradeTickerBranchesAndRestart(t *testing.T) {
 		}
 	}
 	execPathFunc = func() (string, error) { return execPath, nil }
-	execCmdFunc = func(_ string, _ ...string) *exec.Cmd { return exec.Command("sh", "-c", "true") }
-	exitCalled := false
-	exitFunc = func(int) { exitCalled = true }
+	restartExecCalled := false
+	execReplaceFunc = func(path string, args []string, env []string) error {
+		restartExecCalled = true
+		return nil
+	}
 
 	cfg := testConfig()
 	cfg.AutoUpgrade = true
@@ -1983,8 +1979,8 @@ func TestRunAutoUpgradeTickerBranchesAndRestart(t *testing.T) {
 	if err := Run(ctx, paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
-	if !exitCalled {
-		t.Fatal("expected restart path to invoke exit")
+	if !restartExecCalled {
+		t.Fatal("expected restart path to exec replacement process")
 	}
 	if checks.Load() < 2 {
 		t.Fatalf("expected multiple upgrade checks, got %d", checks.Load())

@@ -35,6 +35,7 @@ var (
 	clientFactory    = newWSClient
 	execPathFunc     = os.Executable
 	execCmdFunc      = exec.Command
+	execReplaceFunc  = syscall.Exec
 	stopTimeout      = 10 * time.Second
 	stopPoll         = 200 * time.Millisecond
 	statusTick       = 5 * time.Second
@@ -44,7 +45,6 @@ var (
 	processLookupCmd = func(pid int) *exec.Cmd {
 		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
 	}
-	exitFunc              = os.Exit
 	upgradeManagerFactory = newUpgradeManager
 )
 
@@ -406,18 +406,10 @@ func restartProcess() error {
 	if err != nil {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
-
-	// Restart directly into daemon runtime to avoid re-entering CLI start guards.
-	cmd := execCmdFunc(execPath, "__run")
-	cmd.Env = os.Environ()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-
-	if err := cmd.Start(); err != nil {
+	args := []string{execPath, "__run"}
+	if err := execReplaceFunc(execPath, args, os.Environ()); err != nil {
 		return fmt.Errorf("restart process: %w", err)
 	}
-	exitFunc(0)
 	return nil
 }
 
