@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -257,6 +258,62 @@ func TestHandleFetchMapsFetcherErrors(t *testing.T) {
 	}
 }
 
+func TestHandleFetchInvalidRequestBodyEncoding(t *testing.T) {
+	clientConn, serverConn := newWSPair(t)
+	c := &Client{
+		cfg: ClientConfig{
+			DefaultTimeoutMS: 250,
+			Fetcher:          staticFetcher{},
+			JobRegistry:      jobs.NewRegistry(),
+			Logger:           discardLogger(),
+		},
+	}
+
+	if err := c.handleFetch(context.Background(), clientConn, FetchRequest{
+		ID:         "job-invalid-body",
+		URL:        "https://example.com",
+		BodyBase64: "@@@not-base64@@@",
+	}); err != nil {
+		t.Fatalf("handle fetch: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var ferr FetchError
+	if err := wsjson.Read(ctx, serverConn, &ferr); err != nil {
+		t.Fatalf("read fetch error: %v", err)
+	}
+	if ferr.Error != "invalid_request_body" {
+		t.Fatalf("expected invalid_request_body, got %+v", ferr)
+	}
+}
+
+func TestHandleFetchWriteResultError(t *testing.T) {
+	clientConn, _ := newWSPair(t)
+	c := &Client{
+		cfg: ClientConfig{
+			DefaultTimeoutMS: 250,
+			Fetcher: staticFetcher{res: fetch.Result{
+				Status:    200,
+				Body:      "ok",
+				FinalURL:  "https://example.com/final",
+				ElapsedMS: 1,
+			}},
+			JobRegistry: jobs.NewRegistry(),
+			Logger:      discardLogger(),
+		},
+	}
+
+	_ = clientConn.Close(websocket.StatusNormalClosure, "close before write")
+	err := c.handleFetch(context.Background(), clientConn, FetchRequest{
+		ID:  "job-write-error",
+		URL: "https://example.com",
+	})
+	if err == nil || !strings.Contains(err.Error(), "write fetch result") {
+		t.Fatalf("expected write fetch result error, got %v", err)
+	}
+}
+
 func TestHandleFetchFetcherErrorWriteFailure(t *testing.T) {
 	clientConn, _ := newWSPair(t)
 	_ = clientConn.Close(websocket.StatusNormalClosure, "force write error")
@@ -375,6 +432,20 @@ func TestUtilityFunctions(t *testing.T) {
 	code, msg = mapFetchError(errors.New("x"), 123)
 	if code != "fetch_failed" || msg != "x" {
 		t.Fatalf("unexpected generic mapping: %s %s", code, msg)
+	}
+
+	body, err := decodeRequestBody(base64.StdEncoding.EncodeToString([]byte("abc")))
+	if err != nil || string(body) != "abc" {
+		t.Fatalf("expected decoded body abc, got body=%q err=%v", string(body), err)
+	}
+
+	body, err = decodeRequestBody("")
+	if err != nil || len(body) != 0 {
+		t.Fatalf("expected empty decoded body, got body=%q err=%v", string(body), err)
+	}
+
+	if _, err := decodeRequestBody("***"); err == nil {
+		t.Fatal("expected invalid body decode error")
 	}
 }
 

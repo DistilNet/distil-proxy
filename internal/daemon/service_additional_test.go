@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,11 +11,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/exec-io/distil-proxy/internal/config"
+	"github.com/exec-io/distil-proxy/internal/upgrade"
+	"github.com/exec-io/distil-proxy/internal/version"
 	"github.com/exec-io/distil-proxy/internal/ws"
 )
 
@@ -25,6 +29,41 @@ func testConfig() config.Config {
 		TimeoutMS: 1000,
 		LogLevel:  "info",
 	}
+}
+
+type stubUpgradeManager struct {
+	handleStartup     func() (bool, error)
+	checkInterval     time.Duration
+	checkAndUpdate    func(ctx context.Context) (upgrade.CheckResult, error)
+	markCleanShutdown func() error
+}
+
+func (s stubUpgradeManager) HandleStartup() (bool, error) {
+	if s.handleStartup != nil {
+		return s.handleStartup()
+	}
+	return false, nil
+}
+
+func (s stubUpgradeManager) CheckInterval() time.Duration {
+	if s.checkInterval > 0 {
+		return s.checkInterval
+	}
+	return time.Hour
+}
+
+func (s stubUpgradeManager) CheckAndUpgrade(ctx context.Context) (upgrade.CheckResult, error) {
+	if s.checkAndUpdate != nil {
+		return s.checkAndUpdate(ctx)
+	}
+	return upgrade.CheckResult{}, nil
+}
+
+func (s stubUpgradeManager) MarkCleanShutdown() error {
+	if s.markCleanShutdown != nil {
+		return s.markCleanShutdown()
+	}
+	return nil
 }
 
 func waitForProcessExit(pid int, timeout time.Duration) bool {
@@ -1619,4 +1658,455 @@ func TestReadLogTailReadError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read log file") {
 		t.Fatalf("expected read log error, got %v", err)
 	}
+}
+
+func TestNewUpgradeManagerBranches(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	cfg := testConfig()
+
+	if mgr := newUpgradeManager(paths, cfg); mgr != nil {
+		t.Fatal("expected nil manager when auto-upgrade is disabled")
+	}
+
+	origExecPath := execPathFunc
+	defer func() { execPathFunc = origExecPath }()
+
+	execPathFunc = func() (string, error) { return "", errors.New("missing executable") }
+	cfg.AutoUpgrade = true
+	if mgr := newUpgradeManager(paths, cfg); mgr != nil {
+		t.Fatal("expected nil manager when executable path lookup fails")
+	}
+
+	execPath := filepath.Join(paths.RootDir, "distil-proxy")
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	if err := os.WriteFile(execPath, []byte("bin"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	execPathFunc = func() (string, error) { return execPath, nil }
+
+	cfg.UpgradeCheckHours = 0
+	mgr := newUpgradeManager(paths, cfg)
+	if mgr == nil {
+		t.Fatal("expected manager when auto-upgrade is enabled")
+	}
+	if got := mgr.CheckInterval(); got != time.Duration(config.DefaultUpgradeCheckHours)*time.Hour {
+		t.Fatalf("expected default check interval, got %v", got)
+	}
+
+	cfg.UpgradeCheckHours = 2
+	mgr = newUpgradeManager(paths, cfg)
+	if mgr == nil {
+		t.Fatal("expected manager for explicit interval")
+	}
+	if got := mgr.CheckInterval(); got != 2*time.Hour {
+		t.Fatalf("expected 2h interval, got %v", got)
+	}
+}
+
+func TestRestartProcessBranches(t *testing.T) {
+	t.Run("exec-path-error", func(t *testing.T) {
+		origExecPath := execPathFunc
+		execPathFunc = func() (string, error) { return "", errors.New("no executable") }
+		defer func() { execPathFunc = origExecPath }()
+
+		if err := restartProcess(); err == nil || !strings.Contains(err.Error(), "resolve executable path") {
+			t.Fatalf("expected executable path error, got %v", err)
+		}
+	})
+
+	t.Run("exec-replace-error", func(t *testing.T) {
+		origExecPath := execPathFunc
+		origExecReplace := execReplaceFunc
+		execPathFunc = func() (string, error) { return "/bin/sh", nil }
+		execReplaceFunc = func(string, []string, []string) error { return errors.New("exec failed") }
+		defer func() {
+			execPathFunc = origExecPath
+			execReplaceFunc = origExecReplace
+		}()
+
+		if err := restartProcess(); err == nil || !strings.Contains(err.Error(), "restart process") {
+			t.Fatalf("expected restart exec error, got %v", err)
+		}
+	})
+
+	t.Run("success-execs-runtime", func(t *testing.T) {
+		origExecPath := execPathFunc
+		origExecReplace := execReplaceFunc
+		execPathFunc = func() (string, error) { return "/bin/sh", nil }
+		var capturedPath string
+		var capturedArgs []string
+		var capturedEnv []string
+		execReplaceFunc = func(path string, args []string, env []string) error {
+			capturedPath = path
+			capturedArgs = append([]string(nil), args...)
+			capturedEnv = append([]string(nil), env...)
+			return nil
+		}
+		defer func() {
+			execPathFunc = origExecPath
+			execReplaceFunc = origExecReplace
+		}()
+
+		if err := restartProcess(); err != nil {
+			t.Fatalf("expected restart success, got %v", err)
+		}
+		if capturedPath != "/bin/sh" {
+			t.Fatalf("expected restart path /bin/sh, got %q", capturedPath)
+		}
+		if len(capturedArgs) != 2 || capturedArgs[0] != "/bin/sh" || capturedArgs[1] != "__run" {
+			t.Fatalf("expected restart to exec [/bin/sh __run], got args=%v", capturedArgs)
+		}
+		if len(capturedEnv) == 0 {
+			t.Fatal("expected restart exec environment to be forwarded")
+		}
+	})
+}
+
+func TestRunAutoUpgradeStartupPaths(t *testing.T) {
+	t.Run("startup-state-error-recorded", func(t *testing.T) {
+		paths := config.DefaultPaths(t.TempDir())
+		if err := config.EnsureStateDirs(paths); err != nil {
+			t.Fatalf("ensure dirs: %v", err)
+		}
+		if err := os.WriteFile(paths.UpgradeStateFile, []byte("{bad-json"), 0o600); err != nil {
+			t.Fatalf("write invalid upgrade state: %v", err)
+		}
+
+		execPath := filepath.Join(paths.RootDir, "distil-proxy")
+		if err := os.WriteFile(execPath, []byte("bin"), 0o755); err != nil {
+			t.Fatalf("write executable: %v", err)
+		}
+
+		origFactory := clientFactory
+		origExecPath := execPathFunc
+		clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+			return fakeRunner{run: func(context.Context) error { return nil }}, nil
+		}
+		execPathFunc = func() (string, error) { return execPath, nil }
+		defer func() {
+			clientFactory = origFactory
+			execPathFunc = origExecPath
+		}()
+
+		cfg := testConfig()
+		cfg.AutoUpgrade = true
+		cfg.UpgradeCheckHours = 1
+
+		if err := Run(context.Background(), paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+
+		status, err := readStatus(paths)
+		if err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		if !strings.Contains(status.LastError, "auto-upgrade startup check failed") {
+			t.Fatalf("expected startup check error in status, got %+v", status)
+		}
+	})
+
+	t.Run("rollback-restarts-process", func(t *testing.T) {
+		paths := config.DefaultPaths(t.TempDir())
+		if err := config.EnsureStateDirs(paths); err != nil {
+			t.Fatalf("ensure dirs: %v", err)
+		}
+
+		execPath := filepath.Join(paths.RootDir, "distil-proxy")
+		if err := os.WriteFile(execPath, []byte("new"), 0o755); err != nil {
+			t.Fatalf("write new binary: %v", err)
+		}
+		if err := os.WriteFile(execPath+".bak", []byte("old"), 0o755); err != nil {
+			t.Fatalf("write backup binary: %v", err)
+		}
+
+		state := upgrade.UpgradeState{
+			UpgradedAt:  time.Now().UTC(),
+			FromVersion: "0.0.1",
+			ToVersion:   version.DefaultInfo().Version,
+			StartedOnce: true,
+			StartedAt:   time.Now().UTC(),
+		}
+		payload, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("marshal state: %v", err)
+		}
+		if err := os.WriteFile(paths.UpgradeStateFile, payload, 0o600); err != nil {
+			t.Fatalf("write upgrade state: %v", err)
+		}
+
+		origFactory := clientFactory
+		origExecPath := execPathFunc
+		origExecReplace := execReplaceFunc
+		clientCalled := false
+		restartExecCalled := false
+		clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+			clientCalled = true
+			return fakeRunner{run: func(context.Context) error { return nil }}, nil
+		}
+		execPathFunc = func() (string, error) { return execPath, nil }
+		execReplaceFunc = func(path string, args []string, env []string) error {
+			restartExecCalled = true
+			return nil
+		}
+		defer func() {
+			clientFactory = origFactory
+			execPathFunc = origExecPath
+			execReplaceFunc = origExecReplace
+		}()
+
+		cfg := testConfig()
+		cfg.AutoUpgrade = true
+		cfg.UpgradeCheckHours = 1
+
+		if err := Run(context.Background(), paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		if clientCalled {
+			t.Fatal("expected websocket client not to be created during rollback restart path")
+		}
+		if !restartExecCalled {
+			t.Fatal("expected restart path to exec replacement process")
+		}
+
+		installed, err := os.ReadFile(execPath)
+		if err != nil {
+			t.Fatalf("read rolled-back binary: %v", err)
+		}
+		if string(installed) != "old" {
+			t.Fatalf("expected rolled-back binary content old, got %q", string(installed))
+		}
+		if _, err := os.Stat(paths.UpgradeStateFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected upgrade state file removed, err=%v", err)
+		}
+	})
+}
+
+func TestRunMarksUpgradeCleanShutdownOnGracefulExit(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+
+	origFactory := clientFactory
+	origUpgraderFactory := upgradeManagerFactory
+	defer func() {
+		clientFactory = origFactory
+		upgradeManagerFactory = origUpgraderFactory
+	}()
+
+	clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+		return fakeRunner{run: func(context.Context) error { return nil }}, nil
+	}
+
+	var markCalls atomic.Int32
+	upgradeManagerFactory = func(config.Paths, config.Config) upgradeManager {
+		return stubUpgradeManager{
+			handleStartup: func() (bool, error) { return false, nil },
+			markCleanShutdown: func() error {
+				markCalls.Add(1)
+				return nil
+			},
+		}
+	}
+
+	cfg := testConfig()
+	cfg.AutoUpgrade = true
+	cfg.UpgradeCheckHours = 1
+
+	if err := Run(context.Background(), paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if markCalls.Load() != 1 {
+		t.Fatalf("expected MarkCleanShutdown to be called once, got %d", markCalls.Load())
+	}
+}
+
+func TestRunAutoUpgradeTickerBranchesAndRestart(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	execPath := filepath.Join(paths.RootDir, "distil-proxy")
+	if err := os.WriteFile(execPath, []byte("bin"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	origFactory := clientFactory
+	origUpgraderFactory := upgradeManagerFactory
+	origExecPath := execPathFunc
+	origExecReplace := execReplaceFunc
+	defer func() {
+		clientFactory = origFactory
+		upgradeManagerFactory = origUpgraderFactory
+		execPathFunc = origExecPath
+		execReplaceFunc = origExecReplace
+	}()
+
+	clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+		return fakeRunner{run: func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		}}, nil
+	}
+
+	var checks atomic.Int32
+	upgradeManagerFactory = func(config.Paths, config.Config) upgradeManager {
+		return stubUpgradeManager{
+			checkInterval: 5 * time.Millisecond,
+			checkAndUpdate: func(context.Context) (upgrade.CheckResult, error) {
+				if checks.Add(1) == 1 {
+					return upgrade.CheckResult{}, errors.New("check failed")
+				}
+				return upgrade.CheckResult{Applied: true}, nil
+			},
+		}
+	}
+	execPathFunc = func() (string, error) { return execPath, nil }
+	restartExecCalled := false
+	execReplaceFunc = func(path string, args []string, env []string) error {
+		restartExecCalled = true
+		return nil
+	}
+
+	cfg := testConfig()
+	cfg.AutoUpgrade = true
+	cfg.UpgradeCheckHours = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := Run(ctx, paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !restartExecCalled {
+		t.Fatal("expected restart path to exec replacement process")
+	}
+	if checks.Load() < 2 {
+		t.Fatalf("expected multiple upgrade checks, got %d", checks.Load())
+	}
+
+	status, err := readStatus(paths)
+	if err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if !strings.Contains(status.LastError, "auto-upgrade check failed") {
+		t.Fatalf("expected upgrade check failure to be recorded, got %+v", status)
+	}
+	if status.WSState != "restarting" {
+		t.Fatalf("expected restarting state before restart, got %+v", status)
+	}
+}
+
+func TestRunFinalizationErrorPaths(t *testing.T) {
+	t.Run("final-write-status-error", func(t *testing.T) {
+		paths := config.DefaultPaths(t.TempDir())
+		cfg := testConfig()
+
+		origFactory := clientFactory
+		origMarshal := marshalStatus
+		defer func() {
+			clientFactory = origFactory
+			marshalStatus = origMarshal
+		}()
+
+		clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+			return fakeRunner{run: func(context.Context) error { return nil }}, nil
+		}
+
+		var marshalCalls atomic.Int32
+		marshalStatus = func(v any, prefix, indent string) ([]byte, error) {
+			if marshalCalls.Add(1) >= 2 {
+				return nil, errors.New("encode failed late")
+			}
+			return json.MarshalIndent(v, prefix, indent)
+		}
+
+		err := Run(context.Background(), paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err == nil || !strings.Contains(err.Error(), "encode status") {
+			t.Fatalf("expected final write status error, got %v", err)
+		}
+	})
+
+	t.Run("remove-pid-if-matches-error", func(t *testing.T) {
+		paths := config.DefaultPaths(t.TempDir())
+		cfg := testConfig()
+
+		origFactory := clientFactory
+		defer func() { clientFactory = origFactory }()
+
+		clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+			return fakeRunner{run: func(context.Context) error {
+				if err := os.WriteFile(paths.PIDFile, []byte("bad-pid"), 0o600); err != nil {
+					t.Fatalf("write bad pid: %v", err)
+				}
+				return nil
+			}}, nil
+		}
+
+		err := Run(context.Background(), paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err == nil || !strings.Contains(err.Error(), "parse pid file") {
+			t.Fatalf("expected removePIDIfMatches parse error, got %v", err)
+		}
+	})
+}
+
+func TestStatusAndReadLogTailAdditionalCoverage(t *testing.T) {
+	t.Run("status-computes-uptime-from-started-at", func(t *testing.T) {
+		paths := config.DefaultPaths(t.TempDir())
+		if err := config.EnsureStateDirs(paths); err != nil {
+			t.Fatalf("ensure dirs: %v", err)
+		}
+		if err := writePID(paths, os.Getpid()); err != nil {
+			t.Fatalf("write pid: %v", err)
+		}
+
+		expectedPath, err := execPathFunc()
+		if err != nil {
+			t.Fatalf("resolve executable path: %v", err)
+		}
+		origProcessName := processNameFn
+		processNameFn = func(_ int) (string, error) {
+			return expectedPath + " __run", nil
+		}
+		defer func() { processNameFn = origProcessName }()
+
+		status := RuntimeStatus{
+			WSState:    "connected",
+			Running:    true,
+			StartedAt:  time.Now().UTC().Add(-2 * time.Second),
+			UpdatedAt:  time.Now().UTC(),
+			LastError:  "",
+			PID:        os.Getpid(),
+			JobsServed: 1,
+		}
+		if err := writeStatus(paths, status); err != nil {
+			t.Fatalf("write status: %v", err)
+		}
+
+		got, err := Status(paths)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if got.UptimeSeconds <= 0 {
+			t.Fatalf("expected uptime to be computed, got %+v", got)
+		}
+	})
+
+	t.Run("read-log-tail-returns-all-lines-when-under-limit", func(t *testing.T) {
+		paths := config.DefaultPaths(t.TempDir())
+		if err := config.EnsureStateDirs(paths); err != nil {
+			t.Fatalf("ensure dirs: %v", err)
+		}
+		if err := os.WriteFile(paths.LogFile, []byte("a\nb\n"), 0o600); err != nil {
+			t.Fatalf("write log file: %v", err)
+		}
+		lines, err := ReadLogTail(paths, 10)
+		if err != nil {
+			t.Fatalf("read log tail: %v", err)
+		}
+		if len(lines) != 2 || lines[0] != "a" || lines[1] != "b" {
+			t.Fatalf("unexpected log lines: %v", lines)
+		}
+	})
 }

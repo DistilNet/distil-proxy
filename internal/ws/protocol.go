@@ -8,12 +8,13 @@ const (
 
 // FetchRequest is sent from server to daemon.
 type FetchRequest struct {
-	Type      string            `json:"type"`
-	ID        string            `json:"id"`
-	URL       string            `json:"url"`
-	Method    string            `json:"method,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	TimeoutMS int               `json:"timeout_ms,omitempty"`
+	Type       string            `json:"type"`
+	ID         string            `json:"id"`
+	URL        string            `json:"url"`
+	Method     string            `json:"method,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	BodyBase64 string            `json:"body_base64,omitempty"`
+	TimeoutMS  int               `json:"timeout_ms,omitempty"`
 }
 
 // FetchResult is sent from daemon to server on successful fetch.
@@ -23,6 +24,7 @@ type FetchResult struct {
 	Status    int               `json:"status"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Body      string            `json:"body,omitempty"`
+	FinalURL  string            `json:"final_url,omitempty"`
 	ElapsedMS int64             `json:"elapsed_ms"`
 }
 

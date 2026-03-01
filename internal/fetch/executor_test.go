@@ -56,6 +56,39 @@ func TestHTTPExecutorFetch(t *testing.T) {
 	if res.Headers["Content-Type"] != "text/plain" {
 		t.Fatalf("expected content-type text/plain, got %q", res.Headers["Content-Type"])
 	}
+	if res.FinalURL != ts.URL {
+		t.Fatalf("expected final URL %q, got %q", ts.URL, res.FinalURL)
+	}
+}
+
+func TestHTTPExecutorFetchSendsRequestBody(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if string(body) != "payload-body" {
+			t.Fatalf("expected payload-body, got %q", string(body))
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	executor := NewHTTPExecutor(1024)
+	res, err := executor.Fetch(context.Background(), Request{
+		URL:    ts.URL,
+		Method: http.MethodPost,
+		Body:   []byte("payload-body"),
+	})
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if res.Body != "ok" {
+		t.Fatalf("expected body ok, got %q", res.Body)
+	}
 }
 
 func TestHTTPExecutorFetchResponseTooLarge(t *testing.T) {
@@ -147,5 +180,26 @@ func TestHTTPExecutorFetchDefaultsMethodAndNilClient(t *testing.T) {
 	}
 	if res.Body != "ok" {
 		t.Fatalf("expected body ok, got %q", res.Body)
+	}
+}
+
+func TestHTTPExecutorFetchTracksRedirectFinalURL(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer final.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	executor := NewHTTPExecutor(1024)
+	res, err := executor.Fetch(context.Background(), Request{URL: redirect.URL})
+	if err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if res.FinalURL != final.URL {
+		t.Fatalf("expected redirected final URL %q, got %q", final.URL, res.FinalURL)
 	}
 }

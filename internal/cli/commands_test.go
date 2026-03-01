@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,99 @@ func TestUninstallRemovesRuntimeDir(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.RootDir); !os.IsNotExist(err) {
 		t.Fatalf("expected runtime dir removed, err=%v", err)
+	}
+}
+
+func TestServiceCommands(t *testing.T) {
+	home := t.TempDir()
+	var installedHome string
+	var removedHome string
+
+	if _, err := runCLI(t, home, "auth", "dk_service_install"); err != nil {
+		t.Fatalf("seed config for service command: %v", err)
+	}
+	paths := config.DefaultPaths(home)
+	serviceBinary := filepath.Join(paths.BinDir, "distil-proxy")
+	if err := os.WriteFile(serviceBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("seed service binary: %v", err)
+	}
+
+	origInstall := installServiceFunc
+	origRemove := removeServiceFunc
+	t.Cleanup(func() {
+		installServiceFunc = origInstall
+		removeServiceFunc = origRemove
+	})
+
+	installServiceFunc = func(targetHome string) error {
+		installedHome = targetHome
+		return nil
+	}
+	removeServiceFunc = func(targetHome string) error {
+		removedHome = targetHome
+		return nil
+	}
+
+	out, err := runCLI(t, home, "service", "install")
+	if err != nil {
+		t.Fatalf("service install command error: %v", err)
+	}
+	if !strings.Contains(out, "service installed") {
+		t.Fatalf("unexpected service install output: %q", out)
+	}
+	if installedHome != home {
+		t.Fatalf("expected install to target home %q, got %q", home, installedHome)
+	}
+
+	out, err = runCLI(t, home, "service", "uninstall")
+	if err != nil {
+		t.Fatalf("service uninstall command error: %v", err)
+	}
+	if !strings.Contains(out, "service removed") {
+		t.Fatalf("unexpected service uninstall output: %q", out)
+	}
+	if removedHome != home {
+		t.Fatalf("expected uninstall to target home %q, got %q", home, removedHome)
+	}
+}
+
+func TestServiceInstallCommandError(t *testing.T) {
+	home := t.TempDir()
+	if _, err := runCLI(t, home, "auth", "dk_service_error"); err != nil {
+		t.Fatalf("seed config for service install error path: %v", err)
+	}
+	paths := config.DefaultPaths(home)
+	serviceBinary := filepath.Join(paths.BinDir, "distil-proxy")
+	if err := os.WriteFile(serviceBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("seed service binary for error path: %v", err)
+	}
+	origInstall := installServiceFunc
+	t.Cleanup(func() { installServiceFunc = origInstall })
+
+	installServiceFunc = func(string) error { return errors.New("boom") }
+	_, err := runCLI(t, home, "service", "install")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected service install error, got %v", err)
+	}
+}
+
+func TestServiceInstallRequiresConfig(t *testing.T) {
+	home := t.TempDir()
+	_, err := runCLI(t, home, "service", "install")
+	if err == nil || !strings.Contains(err.Error(), "config not found; run 'distil-proxy auth <dk_key>' first") {
+		t.Fatalf("expected service install config error, got %v", err)
+	}
+}
+
+func TestServiceInstallRequiresManagedBinary(t *testing.T) {
+	home := t.TempDir()
+	if _, err := runCLI(t, home, "auth", "dk_service_binary"); err != nil {
+		t.Fatalf("seed config for managed binary check: %v", err)
+	}
+
+	_, err := runCLI(t, home, "service", "install")
+	if err == nil || !strings.Contains(err.Error(), "service binary not found") {
+		t.Fatalf("expected missing managed binary error, got %v", err)
 	}
 }
 
