@@ -87,6 +87,34 @@ func TestStartWritesStatusAndPreventsDuplicate(t *testing.T) {
 	}
 }
 
+func TestStartDetachesChildSession(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	cfg := testConfig()
+
+	origExecPath := execPathFunc
+	origExecCmd := execCmdFunc
+	var startedCmd *exec.Cmd
+	execPathFunc = func() (string, error) { return "/bin/sh", nil }
+	execCmdFunc = func(_ string, _ ...string) *exec.Cmd {
+		startedCmd = exec.Command("sh", "-c", "sleep 30")
+		return startedCmd
+	}
+	defer func() {
+		execPathFunc = origExecPath
+		execCmdFunc = origExecCmd
+	}()
+
+	if err := Start(paths, cfg); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	if startedCmd == nil || startedCmd.SysProcAttr == nil || !startedCmd.SysProcAttr.Setsid {
+		t.Fatalf("expected daemon child to run in detached session, got %+v", startedCmd)
+	}
+	if startedCmd.Process != nil {
+		terminateProcess(startedCmd.Process)
+	}
+}
+
 func TestStartForegroundAndRunClientFactoryError(t *testing.T) {
 	paths := config.DefaultPaths(t.TempDir())
 	cfg := testConfig()
@@ -614,6 +642,35 @@ func TestDaemonOwnsPIDBranches(t *testing.T) {
 	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy-other --foreground", nil }
 	if daemonOwnsPID(os.Getpid()) {
 		t.Fatal("expected executable prefix collisions to be rejected")
+	}
+}
+
+func TestDaemonOwnsPIDAcceptsSymlinkedExecutablePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	expectedAlias := filepath.Join(tmpDir, "distil-proxy-alias-a")
+	processAlias := filepath.Join(tmpDir, "distil-proxy-alias-b")
+	if err := os.Symlink(realBinary, expectedAlias); err != nil {
+		t.Fatalf("symlink expected alias: %v", err)
+	}
+	if err := os.Symlink(realBinary, processAlias); err != nil {
+		t.Fatalf("symlink process alias: %v", err)
+	}
+
+	origExecPath := execPathFunc
+	origProcessName := processNameFn
+	execPathFunc = func() (string, error) { return expectedAlias, nil }
+	processNameFn = func(_ int) (string, error) { return processAlias + " __run", nil }
+	defer func() {
+		execPathFunc = origExecPath
+		processNameFn = origProcessName
+	}()
+
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected symlink aliases of the same binary to be treated as daemon ownership")
 	}
 }
 

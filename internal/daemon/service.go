@@ -10,13 +10,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/exec-io/distil-proxy/internal/config"
 	"github.com/exec-io/distil-proxy/internal/fetch"
@@ -95,6 +95,7 @@ func Start(paths config.Paths, cfg config.Config) error {
 	defer logFile.Close()
 
 	cmd := execCmdFunc(execPath, "__run")
+	detachProcessSession(cmd)
 	cmd.Env = append(os.Environ(), "DISTIL_PROXY_DAEMON=1")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -449,19 +450,27 @@ func daemonOwnsPID(pid int) bool {
 }
 
 func commandMatchesExecutable(commandLine, expectedPath string) bool {
-	commandLine = strings.TrimSpace(commandLine)
 	expectedPath = strings.TrimSpace(expectedPath)
-	if commandLine == "" || expectedPath == "" {
+	if expectedPath == "" {
 		return false
 	}
-	if commandLine == expectedPath {
+	commandPath, ok := commandExecutablePath(commandLine)
+	if !ok {
+		return false
+	}
+	if commandPath == expectedPath {
 		return true
 	}
-	if !strings.HasPrefix(commandLine, expectedPath) || len(commandLine) <= len(expectedPath) {
+
+	commandResolved, commandInfo, commandErr := executableIdentity(commandPath)
+	expectedResolved, expectedInfo, expectedErr := executableIdentity(expectedPath)
+	if commandErr != nil || expectedErr != nil {
 		return false
 	}
-	nextRune, _ := utf8.DecodeRuneInString(commandLine[len(expectedPath):])
-	return unicode.IsSpace(nextRune)
+	if commandResolved == expectedResolved {
+		return true
+	}
+	return os.SameFile(commandInfo, expectedInfo)
 }
 
 func processNameByPID(pid int) (string, error) {
@@ -475,6 +484,77 @@ func processNameByPID(pid int) (string, error) {
 		return "", errors.New("empty process name")
 	}
 	return name, nil
+}
+
+func commandExecutablePath(commandLine string) (string, bool) {
+	commandLine = strings.TrimSpace(commandLine)
+	if commandLine == "" {
+		return "", false
+	}
+	if commandLine[0] == '"' || commandLine[0] == '\'' {
+		return quotedExecutablePath(commandLine)
+	}
+	if idx := strings.IndexFunc(commandLine, unicode.IsSpace); idx >= 0 {
+		if idx == 0 {
+			return "", false
+		}
+		return commandLine[:idx], true
+	}
+	return commandLine, true
+}
+
+func quotedExecutablePath(commandLine string) (string, bool) {
+	quote := commandLine[0]
+	var builder strings.Builder
+	escaped := false
+	for i := 1; i < len(commandLine); i++ {
+		ch := commandLine[i]
+		if quote == '"' && ch == '\\' && !escaped {
+			escaped = true
+			continue
+		}
+		if escaped {
+			builder.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == quote {
+			if builder.Len() == 0 {
+				return "", false
+			}
+			return builder.String(), true
+		}
+		builder.WriteByte(ch)
+	}
+	return "", false
+}
+
+func executableIdentity(path string) (string, os.FileInfo, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || cleaned == "." {
+		return "", nil, errors.New("empty executable path")
+	}
+
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		resolved = cleaned
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", nil, err
+	}
+	return resolved, info, nil
+}
+
+func detachProcessSession(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid = true
 }
 
 func terminateProcess(proc *os.Process) {
