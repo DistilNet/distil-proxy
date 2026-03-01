@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/exec-io/distil-proxy/internal/config"
 	"github.com/exec-io/distil-proxy/internal/fetch"
@@ -450,27 +451,38 @@ func daemonOwnsPID(pid int) bool {
 }
 
 func commandMatchesExecutable(commandLine, expectedPath string) bool {
+	commandLine = strings.TrimSpace(commandLine)
 	expectedPath = strings.TrimSpace(expectedPath)
-	if expectedPath == "" {
+	if commandLine == "" || expectedPath == "" {
 		return false
 	}
-	commandPath, ok := commandExecutablePath(commandLine)
-	if !ok {
-		return false
-	}
-	if commandPath == expectedPath {
+	if commandLineHasExecutablePrefix(commandLine, expectedPath) {
 		return true
 	}
+	candidates := make([]string, 0, 2)
+	if commandPath, ok := commandExecutablePath(commandLine); ok {
+		candidates = append(candidates, commandPath)
+	}
+	if commandPath, ok := commandExecutableForDaemonRun(commandLine); ok {
+		candidates = append(candidates, commandPath)
+	}
+	for _, commandPath := range candidates {
+		if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
+			return true
+		}
+	}
+	return false
+}
 
-	commandResolved, commandInfo, commandErr := executableIdentity(commandPath)
-	expectedResolved, expectedInfo, expectedErr := executableIdentity(expectedPath)
-	if commandErr != nil || expectedErr != nil {
-		return false
-	}
-	if commandResolved == expectedResolved {
+func commandLineHasExecutablePrefix(commandLine, expectedPath string) bool {
+	if commandLine == expectedPath {
 		return true
 	}
-	return os.SameFile(commandInfo, expectedInfo)
+	if !strings.HasPrefix(commandLine, expectedPath) || len(commandLine) <= len(expectedPath) {
+		return false
+	}
+	nextRune, _ := utf8.DecodeRuneInString(commandLine[len(expectedPath):])
+	return unicode.IsSpace(nextRune)
 }
 
 func processNameByPID(pid int) (string, error) {
@@ -500,6 +512,36 @@ func commandExecutablePath(commandLine string) (string, bool) {
 	return commandLine, true
 }
 
+func commandExecutableForDaemonRun(commandLine string) (string, bool) {
+	commandLine = strings.TrimSpace(commandLine)
+	if commandLine == "" {
+		return "", false
+	}
+
+	const daemonRunArg = "__run"
+	idx := strings.LastIndex(commandLine, daemonRunArg)
+	if idx <= 0 {
+		return "", false
+	}
+	if strings.TrimSpace(commandLine[idx+len(daemonRunArg):]) != "" {
+		return "", false
+	}
+
+	rawPrefix := commandLine[:idx]
+	lastRune, _ := utf8.DecodeLastRuneInString(rawPrefix)
+	if !unicode.IsSpace(lastRune) {
+		return "", false
+	}
+	commandPath := strings.TrimSpace(rawPrefix)
+	if unquoted, ok := unquotePath(commandPath); ok {
+		commandPath = unquoted
+	}
+	if commandPath == "" {
+		return "", false
+	}
+	return commandPath, true
+}
+
 func quotedExecutablePath(commandLine string) (string, bool) {
 	quote := commandLine[0]
 	var builder strings.Builder
@@ -526,6 +568,17 @@ func quotedExecutablePath(commandLine string) (string, bool) {
 	return "", false
 }
 
+func unquotePath(path string) (string, bool) {
+	if len(path) < 2 {
+		return "", false
+	}
+	quote := path[0]
+	if (quote != '"' && quote != '\'') || path[len(path)-1] != quote {
+		return "", false
+	}
+	return path[1 : len(path)-1], true
+}
+
 func executableIdentity(path string) (string, os.FileInfo, error) {
 	cleaned := filepath.Clean(strings.TrimSpace(path))
 	if cleaned == "" || cleaned == "." {
@@ -542,6 +595,18 @@ func executableIdentity(path string) (string, os.FileInfo, error) {
 		return "", nil, err
 	}
 	return resolved, info, nil
+}
+
+func sameExecutableFile(pathA, pathB string) bool {
+	resolvedA, infoA, errA := executableIdentity(pathA)
+	resolvedB, infoB, errB := executableIdentity(pathB)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if resolvedA == resolvedB {
+		return true
+	}
+	return os.SameFile(infoA, infoB)
 }
 
 func detachProcessSession(cmd *exec.Cmd) {

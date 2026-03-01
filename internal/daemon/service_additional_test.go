@@ -674,6 +674,38 @@ func TestDaemonOwnsPIDAcceptsSymlinkedExecutablePaths(t *testing.T) {
 	}
 }
 
+func TestDaemonOwnsPIDAcceptsUnquotedExecutableWithSpaces(t *testing.T) {
+	tmpDir := filepath.Join(t.TempDir(), "home with spaces")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatalf("mkdir temp dir with spaces: %v", err)
+	}
+	realBinary := filepath.Join(tmpDir, "distil-proxy-real")
+	if err := os.WriteFile(realBinary, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write real executable: %v", err)
+	}
+	expectedAlias := filepath.Join(tmpDir, "distil proxy alias a")
+	processAlias := filepath.Join(tmpDir, "distil proxy alias b")
+	if err := os.Symlink(realBinary, expectedAlias); err != nil {
+		t.Fatalf("symlink expected alias: %v", err)
+	}
+	if err := os.Symlink(realBinary, processAlias); err != nil {
+		t.Fatalf("symlink process alias: %v", err)
+	}
+
+	origExecPath := execPathFunc
+	origProcessName := processNameFn
+	execPathFunc = func() (string, error) { return expectedAlias, nil }
+	processNameFn = func(_ int) (string, error) { return processAlias + " __run", nil }
+	defer func() {
+		execPathFunc = origExecPath
+		processNameFn = origProcessName
+	}()
+
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected unquoted command paths with spaces to be matched by daemon ownership checks")
+	}
+}
+
 func TestCommandExecutablePathParsing(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -726,6 +758,52 @@ func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
 	}
 	if commandMatchesExecutable(`"/tmp/unclosed`, "/tmp/distil-proxy") {
 		t.Fatal("expected malformed quoted command line to be rejected")
+	}
+}
+
+func TestCommandExecutableForDaemonRun(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "unquoted-path-with-spaces",
+			input:  "/tmp/home with spaces/distil-proxy __run",
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "quoted-path-with-spaces",
+			input:  `"/tmp/home with spaces/distil-proxy" __run`,
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "extra-args-after-run",
+			input:  "/tmp/distil-proxy __run extra",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "missing-run-arg",
+			input:  "/tmp/distil-proxy --foreground",
+			want:   "",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := commandExecutableForDaemonRun(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
+			}
+			if got != tc.want {
+				t.Fatalf("expected executable %q, got %q", tc.want, got)
+			}
+		})
 	}
 }
 
