@@ -1727,8 +1727,14 @@ func TestRestartProcessBranches(t *testing.T) {
 		origExecPath := execPathFunc
 		origExecCmd := execCmdFunc
 		origExit := exitFunc
+		origArgs := os.Args
 		execPathFunc = func() (string, error) { return "/bin/sh", nil }
-		execCmdFunc = func(_ string, _ ...string) *exec.Cmd { return exec.Command("sh", "-c", "true") }
+		var capturedArgs []string
+		execCmdFunc = func(_ string, args ...string) *exec.Cmd {
+			capturedArgs = append([]string(nil), args...)
+			return exec.Command("sh", "-c", "true")
+		}
+		os.Args = []string{"distil-proxy", "start", "--foreground"}
 		var exitCode int
 		exitCalls := 0
 		exitFunc = func(code int) {
@@ -1739,10 +1745,14 @@ func TestRestartProcessBranches(t *testing.T) {
 			execPathFunc = origExecPath
 			execCmdFunc = origExecCmd
 			exitFunc = origExit
+			os.Args = origArgs
 		}()
 
 		if err := restartProcess(); err != nil {
 			t.Fatalf("expected restart success, got %v", err)
+		}
+		if len(capturedArgs) != 1 || capturedArgs[0] != "__run" {
+			t.Fatalf("expected restart to execute __run, got args=%v", capturedArgs)
 		}
 		if exitCalls != 1 || exitCode != 0 {
 			t.Fatalf("expected exit(0) once, calls=%d code=%d", exitCalls, exitCode)

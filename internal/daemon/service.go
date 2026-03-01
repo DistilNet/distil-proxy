@@ -396,7 +396,8 @@ func restartProcess() error {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
 
-	cmd := execCmdFunc(execPath, os.Args[1:]...)
+	// Restart directly into daemon runtime to avoid re-entering CLI start guards.
+	cmd := execCmdFunc(execPath, "__run")
 	cmd.Env = os.Environ()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
