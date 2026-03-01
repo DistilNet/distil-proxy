@@ -495,9 +495,6 @@ func commandExecutablePath(commandLine string) (string, bool) {
 		return quotedExecutablePath(commandLine)
 	}
 	if idx := strings.IndexFunc(commandLine, unicode.IsSpace); idx >= 0 {
-		if idx == 0 {
-			return "", false
-		}
 		return commandLine[:idx], true
 	}
 	return commandLine, true

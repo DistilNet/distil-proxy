@@ -685,6 +685,7 @@ func TestCommandExecutablePathParsing(t *testing.T) {
 		{name: "single-token", input: "/tmp/distil-proxy", want: "/tmp/distil-proxy", wantOK: true},
 		{name: "with-args", input: "/tmp/distil-proxy __run", want: "/tmp/distil-proxy", wantOK: true},
 		{name: "double-quoted", input: `"/tmp/with spaces/distil-proxy" __run`, want: "/tmp/with spaces/distil-proxy", wantOK: true},
+		{name: "double-quoted-escaped", input: `"/tmp/distil-proxy\"quoted\"" __run`, want: `/tmp/distil-proxy"quoted"`, wantOK: true},
 		{name: "single-quoted", input: `'/tmp/with spaces/distil-proxy' __run`, want: "/tmp/with spaces/distil-proxy", wantOK: true},
 		{name: "unterminated-quote", input: `"/tmp/distil-proxy`, want: "", wantOK: false},
 		{name: "empty-quoted", input: `"" __run`, want: "", wantOK: false},
@@ -716,6 +717,15 @@ func TestCommandMatchesExecutableUsesSameFileIdentity(t *testing.T) {
 
 	if !commandMatchesExecutable(hardLinkBinary+" __run", realBinary) {
 		t.Fatal("expected hard-linked executable paths to match by file identity")
+	}
+}
+
+func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
+	if commandMatchesExecutable("command", "   ") {
+		t.Fatal("expected blank expectedPath to be rejected")
+	}
+	if commandMatchesExecutable(`"/tmp/unclosed`, "/tmp/distil-proxy") {
+		t.Fatal("expected malformed quoted command line to be rejected")
 	}
 }
 
