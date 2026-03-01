@@ -166,6 +166,38 @@ func TestHandleFetchDuplicateID(t *testing.T) {
 	}
 }
 
+func TestHandleFetchDuplicateIDWriteError(t *testing.T) {
+	clientConn, _ := newWSPair(t)
+	_ = clientConn.Close(websocket.StatusNormalClosure, "force write error")
+
+	reg := jobs.NewRegistry()
+	if err := reg.Start("job-dup", func() {}); err != nil {
+		t.Fatalf("start job in registry: %v", err)
+	}
+	defer reg.Finish("job-dup")
+
+	jobResultCalled := false
+	c := &Client{
+		cfg: ClientConfig{
+			DefaultTimeoutMS: 1000,
+			Fetcher:          staticFetcher{},
+			JobRegistry:      reg,
+			Logger:           discardLogger(),
+			Hooks: Hooks{
+				OnJobResult: func(bool, int64) { jobResultCalled = true },
+			},
+		},
+	}
+
+	err := c.handleFetch(context.Background(), clientConn, FetchRequest{ID: "job-dup", URL: "https://example.com"})
+	if err == nil || !strings.Contains(err.Error(), "write duplicate fetch error") {
+		t.Fatalf("expected duplicate fetch write error, got %v", err)
+	}
+	if jobResultCalled {
+		t.Fatal("expected no job result emission when duplicate fetch error cannot be sent")
+	}
+}
+
 func TestHandleFetchMapsFetcherErrors(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -222,6 +254,32 @@ func TestHandleFetchMapsFetcherErrors(t *testing.T) {
 				t.Fatalf("expected message to contain %q, got %q", tc.wantInMsg, ferr.Message)
 			}
 		})
+	}
+}
+
+func TestHandleFetchFetcherErrorWriteFailure(t *testing.T) {
+	clientConn, _ := newWSPair(t)
+	_ = clientConn.Close(websocket.StatusNormalClosure, "force write error")
+
+	jobResultCalled := false
+	c := &Client{
+		cfg: ClientConfig{
+			DefaultTimeoutMS: 250,
+			Fetcher:          staticFetcher{err: errors.New("network failed")},
+			JobRegistry:      jobs.NewRegistry(),
+			Logger:           discardLogger(),
+			Hooks: Hooks{
+				OnJobResult: func(bool, int64) { jobResultCalled = true },
+			},
+		},
+	}
+
+	err := c.handleFetch(context.Background(), clientConn, FetchRequest{ID: "job-write-fail", URL: "https://example.com"})
+	if err == nil || !strings.Contains(err.Error(), "write fetch error") {
+		t.Fatalf("expected fetch_error write failure, got %v", err)
+	}
+	if jobResultCalled {
+		t.Fatal("expected no job result emission when fetch_error cannot be delivered")
 	}
 }
 

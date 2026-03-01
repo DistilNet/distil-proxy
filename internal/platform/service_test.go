@@ -63,6 +63,45 @@ func TestRemoveServiceDefinitions(t *testing.T) {
 	}
 }
 
+func TestRemoveServiceDefinitionsLinuxReloadAfterRemove(t *testing.T) {
+	withPlatformGlobalsReset(t)
+	home := t.TempDir()
+	platformGOOS = "linux"
+
+	events := make([]string, 0, 4)
+	execCommandFunc = func(name string, args ...string) *exec.Cmd {
+		events = append(events, name+" "+strings.Join(args, " "))
+		return exec.Command("sh", "-c", "true")
+	}
+	removeFileFunc = func(path string) error {
+		events = append(events, "remove "+path)
+		return nil
+	}
+
+	if err := RemoveServiceDefinitions(home); err != nil {
+		t.Fatalf("remove service defs linux: %v", err)
+	}
+
+	removeEvent := "remove " + filepath.Join(home, SystemdServicePath)
+	reloadEvent := "systemctl --user daemon-reload"
+	removeIdx := -1
+	reloadIdx := -1
+	for i, event := range events {
+		if event == removeEvent {
+			removeIdx = i
+		}
+		if event == reloadEvent {
+			reloadIdx = i
+		}
+	}
+	if removeIdx == -1 || reloadIdx == -1 {
+		t.Fatalf("expected remove and daemon-reload events, got %v", events)
+	}
+	if reloadIdx <= removeIdx {
+		t.Fatalf("expected daemon-reload after unit removal, got %v", events)
+	}
+}
+
 func TestRemoveServiceDefinitionsErrors(t *testing.T) {
 	withPlatformGlobalsReset(t)
 	home := t.TempDir()

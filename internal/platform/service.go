@@ -10,11 +10,11 @@ import (
 )
 
 var (
-	platformGOOS      = runtime.GOOS
-	execCommandFunc   = exec.Command
-	removeFileFunc    = os.Remove
-	mkdirAllFunc      = os.MkdirAll
-	writeFileFunc     = os.WriteFile
+	platformGOOS    = runtime.GOOS
+	execCommandFunc = exec.Command
+	removeFileFunc  = os.Remove
+	mkdirAllFunc    = os.MkdirAll
+	writeFileFunc   = os.WriteFile
 )
 
 // RemoveServiceDefinitions removes local launchd/systemd-user service definitions.
@@ -31,10 +31,10 @@ func RemoveServiceDefinitions(homeDir string) error {
 	case "linux":
 		service := filepath.Join(homeDir, SystemdServicePath)
 		_ = execCommandFunc("systemctl", "--user", "disable", "--now", "distil-proxy").Run()
-		_ = execCommandFunc("systemctl", "--user", "daemon-reload").Run()
 		if err := removeIfExists(service); err != nil {
 			errs = append(errs, err)
 		}
+		_ = execCommandFunc("systemctl", "--user", "daemon-reload").Run()
 	}
 
 	if len(errs) > 0 {

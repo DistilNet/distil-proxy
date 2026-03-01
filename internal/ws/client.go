@@ -246,12 +246,14 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 	fetchCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 	if err := c.cfg.JobRegistry.Start(req.ID, cancel); err != nil {
-		_ = c.writeJSON(ctx, conn, FetchError{
+		if err := c.writeJSON(ctx, conn, FetchError{
 			Type:    "fetch_error",
 			ID:      req.ID,
 			Error:   "duplicate_job_id",
 			Message: "Job is already in progress",
-		})
+		}); err != nil {
+			return fmt.Errorf("write duplicate fetch error: %w", err)
+		}
 		c.emitJobResult(false, 0)
 		return nil
 	}
@@ -265,12 +267,14 @@ func (c *Client) handleFetch(ctx context.Context, conn *websocket.Conn, req Fetc
 	})
 	if err != nil {
 		code, msg := mapFetchError(err, timeoutMS)
-		_ = c.writeJSON(ctx, conn, FetchError{
+		if err := c.writeJSON(ctx, conn, FetchError{
 			Type:    "fetch_error",
 			ID:      req.ID,
 			Error:   code,
 			Message: msg,
-		})
+		}); err != nil {
+			return fmt.Errorf("write fetch error: %w", err)
+		}
 		c.emitJobResult(false, 0)
 		return nil
 	}
