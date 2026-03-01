@@ -639,6 +639,11 @@ func TestDaemonOwnsPIDBranches(t *testing.T) {
 		t.Fatal("expected daemon __run invocation to accept ownership")
 	}
 
+	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy start --foreground", nil }
+	if !daemonOwnsPID(os.Getpid()) {
+		t.Fatal("expected foreground daemon invocation to accept ownership")
+	}
+
 	processNameFn = func(_ int) (string, error) { return "/tmp/distil-proxy auth dk_test", nil }
 	if daemonOwnsPID(os.Getpid()) {
 		t.Fatal("expected non-daemon CLI invocation to be rejected")
@@ -764,6 +769,9 @@ func TestCommandMatchesExecutableGuardBranches(t *testing.T) {
 	if commandMatchesExecutable(`"/tmp/unclosed`, "/tmp/distil-proxy") {
 		t.Fatal("expected malformed quoted command line to be rejected")
 	}
+	if commandMatchesExecutable("/tmp/distil-proxy start", "/tmp/distil-proxy") {
+		t.Fatal("expected start command without --foreground to be rejected")
+	}
 	if commandMatchesExecutable("/tmp/distil-proxy auth", "/tmp/distil-proxy") {
 		t.Fatal("expected non-daemon command line to be rejected")
 	}
@@ -805,6 +813,64 @@ func TestCommandExecutableForDaemonRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := commandExecutableForDaemonRun(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
+			}
+			if got != tc.want {
+				t.Fatalf("expected executable %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCommandExecutableForForegroundStart(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "standard-foreground",
+			input:  "/tmp/distil-proxy start --foreground",
+			want:   "/tmp/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "foreground-equals-true",
+			input:  "/tmp/distil-proxy start --foreground=true",
+			want:   "/tmp/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "unquoted-path-with-spaces",
+			input:  "/tmp/home with spaces/distil-proxy start --foreground",
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "quoted-path-with-spaces",
+			input:  `"/tmp/home with spaces/distil-proxy" start --foreground`,
+			want:   "/tmp/home with spaces/distil-proxy",
+			wantOK: true,
+		},
+		{
+			name:   "missing-foreground-flag",
+			input:  "/tmp/distil-proxy start",
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "wrong-command",
+			input:  "/tmp/distil-proxy status",
+			want:   "",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := commandExecutableForForegroundStart(tc.input)
 			if ok != tc.wantOK {
 				t.Fatalf("expected ok=%t, got %t for input %q", tc.wantOK, ok, tc.input)
 			}

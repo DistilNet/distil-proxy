@@ -463,12 +463,18 @@ func commandMatchesExecutable(commandLine, expectedPath string) bool {
 	if commandLine == "" || expectedPath == "" {
 		return false
 	}
-	commandPath, ok := commandExecutableForDaemonRun(commandLine)
-	if !ok {
-		return false
+
+	candidates := make([]string, 0, 2)
+	if commandPath, ok := commandExecutableForDaemonRun(commandLine); ok {
+		candidates = append(candidates, commandPath)
 	}
-	if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
-		return true
+	if commandPath, ok := commandExecutableForForegroundStart(commandLine); ok {
+		candidates = append(candidates, commandPath)
+	}
+	for _, commandPath := range candidates {
+		if commandPath == expectedPath || sameExecutableFile(commandPath, expectedPath) {
+			return true
+		}
 	}
 	return false
 }
@@ -528,6 +534,33 @@ func commandExecutableForDaemonRun(commandLine string) (string, bool) {
 		return "", false
 	}
 	return commandPath, true
+}
+
+func commandExecutableForForegroundStart(commandLine string) (string, bool) {
+	commandLine = strings.TrimSpace(commandLine)
+	if commandLine == "" {
+		return "", false
+	}
+
+	suffixes := []string{
+		" start --foreground",
+		" start --foreground=true",
+	}
+	for _, suffix := range suffixes {
+		if !strings.HasSuffix(commandLine, suffix) {
+			continue
+		}
+		commandPath := strings.TrimSpace(strings.TrimSuffix(commandLine, suffix))
+		if unquoted, ok := unquotePath(commandPath); ok {
+			commandPath = unquoted
+		}
+		if commandPath == "" {
+			return "", false
+		}
+		return commandPath, true
+	}
+
+	return "", false
 }
 
 func quotedExecutablePath(commandLine string) (string, bool) {
