@@ -47,11 +47,12 @@ type ReleaseInfo struct {
 }
 
 type UpgradeState struct {
-	UpgradedAt  time.Time `json:"upgraded_at"`
-	FromVersion string    `json:"from_version"`
-	ToVersion   string    `json:"to_version"`
-	StartedOnce bool      `json:"started_once"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
+	UpgradedAt    time.Time `json:"upgraded_at"`
+	FromVersion   string    `json:"from_version"`
+	ToVersion     string    `json:"to_version"`
+	StartedOnce   bool      `json:"started_once"`
+	StartedAt     time.Time `json:"started_at,omitempty"`
+	CleanShutdown bool      `json:"clean_shutdown,omitempty"`
 }
 
 type CheckResult struct {
@@ -105,7 +106,14 @@ func (m *Manager) HandleStartup() (bool, error) {
 	if !state.StartedOnce {
 		state.StartedOnce = true
 		state.StartedAt = m.now()
+		state.CleanShutdown = false
 		return false, m.saveState(state)
+	}
+
+	if state.CleanShutdown {
+		_ = m.clearState()
+		_ = os.Remove(m.cfg.BackupPath)
+		return false, nil
 	}
 
 	if m.now().Sub(state.StartedAt) < m.cfg.RollbackWindow {
@@ -225,6 +233,27 @@ func (m *Manager) saveState(state UpgradeState) error {
 		return err
 	}
 	return replaceFile(tmp, m.cfg.StatePath)
+}
+
+func (m *Manager) MarkCleanShutdown() error {
+	state, err := m.loadState()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !state.StartedOnce {
+		return nil
+	}
+	if normalizeVersion(state.ToVersion) != normalizeVersion(m.cfg.CurrentVersion) {
+		return nil
+	}
+	if state.CleanShutdown {
+		return nil
+	}
+	state.CleanShutdown = true
+	return m.saveState(state)
 }
 
 func (m *Manager) clearState() error {

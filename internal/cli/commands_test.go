@@ -196,6 +196,10 @@ func TestServiceCommands(t *testing.T) {
 	var installedHome string
 	var removedHome string
 
+	if _, err := runCLI(t, home, "auth", "dk_service_install"); err != nil {
+		t.Fatalf("seed config for service command: %v", err)
+	}
+
 	origInstall := installServiceFunc
 	origRemove := removeServiceFunc
 	t.Cleanup(func() {
@@ -237,6 +241,9 @@ func TestServiceCommands(t *testing.T) {
 
 func TestServiceInstallCommandError(t *testing.T) {
 	home := t.TempDir()
+	if _, err := runCLI(t, home, "auth", "dk_service_error"); err != nil {
+		t.Fatalf("seed config for service install error path: %v", err)
+	}
 	origInstall := installServiceFunc
 	t.Cleanup(func() { installServiceFunc = origInstall })
 
@@ -244,6 +251,14 @@ func TestServiceInstallCommandError(t *testing.T) {
 	_, err := runCLI(t, home, "service", "install")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected service install error, got %v", err)
+	}
+}
+
+func TestServiceInstallRequiresConfig(t *testing.T) {
+	home := t.TempDir()
+	_, err := runCLI(t, home, "service", "install")
+	if err == nil || !strings.Contains(err.Error(), "config not found; run 'distil-proxy auth <dk_key>' first") {
+		t.Fatalf("expected service install config error, got %v", err)
 	}
 }
 

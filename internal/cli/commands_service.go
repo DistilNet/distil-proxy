@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/exec-io/distil-proxy/internal/config"
@@ -31,6 +32,12 @@ func newServiceInstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			paths, err := config.DetectPaths()
 			if err != nil {
+				return err
+			}
+			if _, err := config.Load(paths); err != nil {
+				if errors.Is(err, config.ErrConfigNotFound) {
+					return errors.New("config not found; run 'distil-proxy auth <dk_key>' first")
+				}
 				return err
 			}
 			if err := config.EnsureStateDirs(paths); err != nil {

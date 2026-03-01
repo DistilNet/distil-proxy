@@ -32,9 +32,10 @@ func testConfig() config.Config {
 }
 
 type stubUpgradeManager struct {
-	handleStartup  func() (bool, error)
-	checkInterval  time.Duration
-	checkAndUpdate func(ctx context.Context) (upgrade.CheckResult, error)
+	handleStartup     func() (bool, error)
+	checkInterval     time.Duration
+	checkAndUpdate    func(ctx context.Context) (upgrade.CheckResult, error)
+	markCleanShutdown func() error
 }
 
 func (s stubUpgradeManager) HandleStartup() (bool, error) {
@@ -56,6 +57,13 @@ func (s stubUpgradeManager) CheckAndUpgrade(ctx context.Context) (upgrade.CheckR
 		return s.checkAndUpdate(ctx)
 	}
 	return upgrade.CheckResult{}, nil
+}
+
+func (s stubUpgradeManager) MarkCleanShutdown() error {
+	if s.markCleanShutdown != nil {
+		return s.markCleanShutdown()
+	}
+	return nil
 }
 
 func waitForProcessExit(pid int, timeout time.Duration) bool {
@@ -1877,6 +1885,46 @@ func TestRunAutoUpgradeStartupPaths(t *testing.T) {
 			t.Fatalf("expected upgrade state file removed, err=%v", err)
 		}
 	})
+}
+
+func TestRunMarksUpgradeCleanShutdownOnGracefulExit(t *testing.T) {
+	paths := config.DefaultPaths(t.TempDir())
+	if err := config.EnsureStateDirs(paths); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+
+	origFactory := clientFactory
+	origUpgraderFactory := upgradeManagerFactory
+	defer func() {
+		clientFactory = origFactory
+		upgradeManagerFactory = origUpgraderFactory
+	}()
+
+	clientFactory = func(_ ws.ClientConfig) (wsRunner, error) {
+		return fakeRunner{run: func(context.Context) error { return nil }}, nil
+	}
+
+	var markCalls atomic.Int32
+	upgradeManagerFactory = func(config.Paths, config.Config) upgradeManager {
+		return stubUpgradeManager{
+			handleStartup: func() (bool, error) { return false, nil },
+			markCleanShutdown: func() error {
+				markCalls.Add(1)
+				return nil
+			},
+		}
+	}
+
+	cfg := testConfig()
+	cfg.AutoUpgrade = true
+	cfg.UpgradeCheckHours = 1
+
+	if err := Run(context.Background(), paths, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if markCalls.Load() != 1 {
+		t.Fatalf("expected MarkCleanShutdown to be called once, got %d", markCalls.Load())
+	}
 }
 
 func TestRunAutoUpgradeTickerBranchesAndRestart(t *testing.T) {

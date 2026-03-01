@@ -56,6 +56,7 @@ type upgradeManager interface {
 	HandleStartup() (bool, error)
 	CheckInterval() time.Duration
 	CheckAndUpgrade(ctx context.Context) (upgrade.CheckResult, error)
+	MarkCleanShutdown() error
 }
 
 func newWSClient(cfg ws.ClientConfig) (wsRunner, error) {
@@ -218,6 +219,7 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 	}
 
 	upgrader := upgradeManagerFactory(paths, cfg)
+	startupChecked := false
 	if upgrader != nil {
 		rolledBack, err := upgrader.HandleStartup()
 		if err != nil {
@@ -229,6 +231,8 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 				s.WSState = "restarting"
 			})
 			return restartProcess()
+		} else {
+			startupChecked = true
 		}
 	}
 
@@ -331,6 +335,13 @@ func Run(ctx context.Context, paths config.Paths, cfg config.Config, logger *slo
 			s.LastError = runErr.Error()
 		})
 		return runErr
+	}
+	if upgrader != nil && startupChecked {
+		if err := upgrader.MarkCleanShutdown(); err != nil {
+			updateStatus(func(s *RuntimeStatus) {
+				s.LastError = fmt.Sprintf("auto-upgrade shutdown state update failed: %v", err)
+			})
+		}
 	}
 
 	statusMu.Lock()
