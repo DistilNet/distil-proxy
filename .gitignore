@@ -1,0 +1,24 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+
+# Runtime files
+*.log
+*.pid
+
+# Coverage artifacts
+coverage.out
+coverage.html
+
+# Local Go caches (used in sandboxed environments)
+.cache/
+.gocache/
+.gopath/
+.gomodcache/
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
