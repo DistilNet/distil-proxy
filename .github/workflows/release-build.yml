@@ -70,17 +70,26 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: distil-proxy-*
+          merge-multiple: true
           path: dist
-
-      - name: Flatten release files
-        run: |
-          find dist -mindepth 2 -type f -name 'distil-proxy-*' -exec mv {} dist/ \;
-          find dist -mindepth 1 -type d -empty -delete
 
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          shasum -a 256 distil-proxy-* > SHA256SUMS
+          shopt -s nullglob
+          files=(distil-proxy-*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release binaries found in dist/"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            if [ -d "$f" ]; then
+              echo "Unexpected directory in release files: $f"
+              exit 1
+            fi
+          done
+          shasum -a 256 "${files[@]}" > SHA256SUMS
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
