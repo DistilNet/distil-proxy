@@ -1,12 +1,19 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/exec-io/distil-proxy/internal/config"
 	"github.com/exec-io/distil-proxy/internal/daemon"
@@ -30,7 +37,7 @@ func newStartCmd() *cobra.Command {
 			cfg, err := config.Load(paths)
 			if err != nil {
 				if errors.Is(err, config.ErrConfigNotFound) {
-					return errors.New("config not found; run 'distil-proxy auth <dk_key>' first")
+					return errors.New("config not found; run 'distil-proxy auth' first")
 				}
 				return err
 			}
@@ -90,7 +97,7 @@ func newRestartCmd() *cobra.Command {
 			cfg, err := config.Load(paths)
 			if err != nil {
 				if errors.Is(err, config.ErrConfigNotFound) {
-					return errors.New("config not found; run 'distil-proxy auth <dk_key>' first")
+					return errors.New("config not found; run 'distil-proxy auth' first")
 				}
 				return err
 			}
@@ -105,79 +112,218 @@ func newRestartCmd() *cobra.Command {
 	}
 }
 
-func newStatusCmd() *cobra.Command {
+func newAuthCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "Show daemon status",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			paths, err := config.DetectPaths()
-			if err != nil {
-				return err
+		Use:   "auth [dk_or_dpk_key]",
+		Short: "Authenticate distil-proxy on this machine",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return saveAuthKey(cmd, args[0])
 			}
-
-			status, err := daemon.Status(paths)
-			if err != nil {
-				return err
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "running: %t\n", status.Running)
-			fmt.Fprintf(cmd.OutOrStdout(), "pid: %d\n", status.PID)
-			fmt.Fprintf(cmd.OutOrStdout(), "ws_state: %s\n", status.WSState)
-			fmt.Fprintf(cmd.OutOrStdout(), "uptime_seconds: %d\n", status.UptimeSeconds)
-			fmt.Fprintf(cmd.OutOrStdout(), "jobs_served: %d\n", status.JobsServed)
-			fmt.Fprintf(cmd.OutOrStdout(), "connect_attempts: %d\n", status.ConnectAttempts)
-			fmt.Fprintf(cmd.OutOrStdout(), "reconnects: %d\n", status.Reconnects)
-			fmt.Fprintf(cmd.OutOrStdout(), "jobs_success: %d\n", status.JobsSuccess)
-			fmt.Fprintf(cmd.OutOrStdout(), "jobs_error: %d\n", status.JobsError)
-			fmt.Fprintf(cmd.OutOrStdout(), "avg_latency_ms: %d\n", status.AvgLatencyMS)
-			fmt.Fprintf(cmd.OutOrStdout(), "latency_le_100_ms: %d\n", status.LatencyLE100MS)
-			fmt.Fprintf(cmd.OutOrStdout(), "latency_le_500_ms: %d\n", status.LatencyLE500MS)
-			fmt.Fprintf(cmd.OutOrStdout(), "latency_le_1000_ms: %d\n", status.LatencyLE1000MS)
-			fmt.Fprintf(cmd.OutOrStdout(), "latency_gt_1000_ms: %d\n", status.LatencyGT1000MS)
-
-			if !status.LastHeartbeat.IsZero() {
-				fmt.Fprintf(cmd.OutOrStdout(), "last_heartbeat: %s\n", status.LastHeartbeat.Format("2006-01-02T15:04:05Z07:00"))
-			}
-			if status.LastError != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "last_error: %s\n", status.LastError)
-			}
-
-			return nil
+			return runInteractiveAuth(cmd)
 		},
 	}
 }
 
-func newAuthCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "auth <dk_key>",
-		Short: "Update API key in local config",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			apiKey := strings.TrimSpace(args[0])
-			if err := config.ValidateAPIKey(apiKey); err != nil {
-				return err
-			}
+type installAuthResponse struct {
+	Status string `json:"status"`
+	Email  string `json:"email"`
+	APIKey string `json:"api_key"`
+	Proxy  string `json:"proxy_key"`
+}
 
-			paths, err := config.DetectPaths()
-			if err != nil {
-				return err
-			}
+type installErrorResponse struct {
+	Error string `json:"error"`
+}
 
-			cfg, err := config.Load(paths)
-			if err != nil {
-				// Allow auth to recover malformed/legacy configs by rewriting from defaults.
-				cfg = config.Config{}
-			}
-
-			cfg.APIKey = apiKey
-			if err := config.Save(paths, cfg); err != nil {
-				return err
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "updated config: %s\n", paths.ConfigFile)
-			return nil
-		},
+func runInteractiveAuth(cmd *cobra.Command) error {
+	paths, err := config.DetectPaths()
+	if err != nil {
+		return err
 	}
+
+	cfg, err := config.Load(paths)
+	if err != nil {
+		cfg = config.Config{}
+	}
+	cfg.ApplyDefaults()
+	baseURL := resolveAuthBaseURL(cfg.Server)
+	reader := bufio.NewReader(cmd.InOrStdin())
+
+	credential, err := readPromptLine(reader, cmd.OutOrStdout(), "Enter your email or existing API key: ")
+	if err != nil {
+		return err
+	}
+	if credential == "" {
+		return errors.New("email or API key is required")
+	}
+
+	email := credential
+	if strings.HasPrefix(credential, "dk_") || strings.HasPrefix(credential, "dpk_") {
+		keyResp, keyErr := postInstallJSON(baseURL, "/api/v1/install/key", map[string]string{
+			"api_key": credential,
+		})
+		if keyErr != nil {
+			return fmt.Errorf("API key authentication failed: %w", keyErr)
+		}
+		email = strings.TrimSpace(keyResp.Email)
+		if email == "" {
+			email, err = readPromptLine(reader, cmd.OutOrStdout(), "Enter the account email to receive a 6-digit code: ")
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if email == "" {
+		return errors.New("email is required for verification")
+	}
+
+	if _, regErr := postInstallJSON(baseURL, "/api/v1/install/register", map[string]string{
+		"email": email,
+	}); regErr != nil {
+		return fmt.Errorf("could not send verification code: %w", regErr)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "We just sent a 6-digit code to %s\n", email)
+	code, err := readPromptLine(reader, cmd.OutOrStdout(), "Enter the 6-digit code sent to your email: ")
+	if err != nil {
+		return err
+	}
+	if code == "" {
+		return errors.New("verification code is required")
+	}
+
+	verifyResp, verifyErr := postInstallJSON(baseURL, "/api/v1/install/verify", map[string]string{
+		"email": email,
+		"code":  code,
+	})
+	if verifyErr != nil {
+		return fmt.Errorf("verification failed: %w", verifyErr)
+	}
+
+	// Prefer api_key (dk_) since the websocket client requires it for authentication.
+	// Fall back to proxy_key (dpk_) only if api_key is not provided.
+	daemonKey := strings.TrimSpace(verifyResp.APIKey)
+	if daemonKey == "" {
+		daemonKey = strings.TrimSpace(verifyResp.Proxy)
+	}
+	if daemonKey == "" {
+		return errors.New("verification succeeded but no daemon key was returned")
+	}
+
+	return saveAuthKey(cmd, daemonKey)
+}
+
+func saveAuthKey(cmd *cobra.Command, key string) error {
+	apiKey := strings.TrimSpace(key)
+	if err := config.ValidateAPIKey(apiKey); err != nil {
+		return err
+	}
+
+	paths, err := config.DetectPaths()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(paths)
+	if err != nil {
+		cfg = config.Config{}
+	}
+
+	cfg.APIKey = apiKey
+	if err := config.Save(paths, cfg); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "updated config: %s\n", paths.ConfigFile)
+	return nil
+}
+
+func readPromptLine(reader *bufio.Reader, out io.Writer, prompt string) (string, error) {
+	if _, err := fmt.Fprint(out, prompt); err != nil {
+		return "", err
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return strings.TrimSpace(line), nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func resolveAuthBaseURL(server string) string {
+	if override := strings.TrimSpace(os.Getenv("DISTIL_AUTH_BASE_URL")); override != "" {
+		return strings.TrimRight(override, "/")
+	}
+
+	u, err := url.Parse(strings.TrimSpace(server))
+	if err != nil || u == nil || u.Hostname() == "" {
+		return "https://distil.net"
+	}
+
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	scheme := "https"
+	if u.Scheme == "ws" || u.Scheme == "http" {
+		scheme = "http"
+	}
+
+	if (host == "localhost" || host == "127.0.0.1") && u.Port() == "3120" {
+		return fmt.Sprintf("%s://%s:3000", scheme, host)
+	}
+	if host == "proxy.distil.net" {
+		return "https://distil.net"
+	}
+	if strings.HasPrefix(host, "proxy.") {
+		return fmt.Sprintf("https://%s", strings.TrimPrefix(host, "proxy."))
+	}
+
+	return "https://distil.net"
+}
+
+func postInstallJSON(baseURL, path string, payload map[string]string) (installAuthResponse, error) {
+	requestURL := strings.TrimRight(baseURL, "/") + path
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return installAuthResponse{}, fmt.Errorf("encode request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return installAuthResponse{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return installAuthResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return installAuthResponse{}, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var e installErrorResponse
+		if decodeErr := json.Unmarshal(raw, &e); decodeErr == nil && strings.TrimSpace(e.Error) != "" {
+			return installAuthResponse{}, fmt.Errorf("%s", e.Error)
+		}
+		return installAuthResponse{}, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var parsed installAuthResponse
+	if len(raw) == 0 {
+		return parsed, nil
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return installAuthResponse{}, fmt.Errorf("decode response: %w", err)
+	}
+	return parsed, nil
 }
 
 func newLogsCmd() *cobra.Command {

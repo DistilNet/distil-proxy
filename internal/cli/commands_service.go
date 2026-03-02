@@ -38,7 +38,7 @@ func newServiceInstallCmd() *cobra.Command {
 			}
 			if _, err := config.Load(paths); err != nil {
 				if errors.Is(err, config.ErrConfigNotFound) {
-					return errors.New("config not found; run 'distil-proxy auth <dk_key>' first")
+					return errors.New("config not found; run 'distil-proxy auth' first")
 				}
 				return err
 			}

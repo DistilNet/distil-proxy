@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -35,16 +34,14 @@ var (
 	clientFactory    = newWSClient
 	execPathFunc     = os.Executable
 	execCmdFunc      = exec.Command
-	execReplaceFunc  = syscall.Exec
+	execReplaceFunc  = execReplace
 	stopTimeout      = 10 * time.Second
 	stopPoll         = 200 * time.Millisecond
 	statusTick       = 5 * time.Second
-	killFunc         = syscall.Kill
+	killFunc         = signalProcess
 	marshalStatus    = json.MarshalIndent
 	processNameFn    = processNameByPID
-	processLookupCmd = func(pid int) *exec.Cmd {
-		return exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
-	}
+	processLookupCmd = processLookupCommand
 	upgradeManagerFactory = newUpgradeManager
 )
 
@@ -438,8 +435,8 @@ func Stop(paths config.Paths) error {
 		return ErrNotRunning
 	}
 
-	if err := killFunc(pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+	if err := killFunc(pid, sigTerm); err != nil {
+		if isNoSuchProcess(err) {
 			if err := removePID(paths); err != nil {
 				return err
 			}
@@ -544,8 +541,8 @@ func processRunning(pid int) bool {
 		return false
 	}
 
-	err := killFunc(pid, syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
+	err := killFunc(pid, sigZero)
+	return err == nil || isPermissionError(err)
 }
 
 func daemonOwnsPID(pid int) bool {
@@ -752,16 +749,6 @@ func sameExecutableFile(pathA, pathB string) bool {
 		return true
 	}
 	return os.SameFile(infoA, infoB)
-}
-
-func detachProcessSession(cmd *exec.Cmd) {
-	if cmd == nil {
-		return
-	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setsid = true
 }
 
 func terminateProcess(proc *os.Process) {

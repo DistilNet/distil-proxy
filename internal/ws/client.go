@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,11 +158,6 @@ func (c *Client) runSession(ctx context.Context) error {
 		<-heartbeatDone
 	}()
 
-	readPollInterval := c.cfg.HeartbeatInterval
-	if readPollInterval <= 0 || readPollInterval > defaultWriteTimeout {
-		readPollInterval = defaultWriteTimeout
-	}
-
 	for {
 		select {
 		case <-sessionCtx.Done():
@@ -174,13 +170,8 @@ func (c *Client) runSession(ctx context.Context) error {
 		default:
 		}
 
-		readCtx, cancelRead := context.WithTimeout(sessionCtx, readPollInterval)
-		_, payload, err := conn.Read(readCtx)
-		cancelRead()
+		_, payload, err := conn.Read(sessionCtx)
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				continue
-			}
 			if isCloseError(err) {
 				return nil
 			}
@@ -204,6 +195,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, conn *websocket.Conn, errs c
 		case <-ticker.C:
 			msg := PingMessage{Type: "ping"}
 			if err := c.writeJSON(ctx, conn, msg); err != nil {
+				_ = conn.Close(websocket.StatusInternalError, "heartbeat failed")
 				errs <- fmt.Errorf("write heartbeat ping: %w", err)
 				return
 			}
@@ -370,10 +362,13 @@ func isCloseError(err error) bool {
 }
 
 func validateAPIKey(key string) error {
-	if len(key) <= len("dk_") || key[:3] != "dk_" {
-		return errors.New("api key must start with dk_")
+	if strings.HasPrefix(key, "dk_") && len(key) > len("dk_") {
+		return nil
 	}
-	return nil
+	if strings.HasPrefix(key, "dpk_") && len(key) > len("dpk_") {
+		return nil
+	}
+	return errors.New("api key must start with dk_ or dpk_")
 }
 
 func mapFetchError(err error, timeoutMS int) (string, string) {

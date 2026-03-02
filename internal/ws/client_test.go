@@ -143,7 +143,7 @@ func TestClientRunHandlesFetchAndHeaders(t *testing.T) {
 }
 
 func TestNewClientRejectsInvalidKey(t *testing.T) {
-	_, err := NewClient(ClientConfig{ServerURL: "wss://example.com/ws", APIKey: "dpk_bad"})
+	_, err := NewClient(ClientConfig{ServerURL: "wss://example.com/ws", APIKey: "invalid_bad"})
 	if err == nil {
 		t.Fatal("expected invalid api key error")
 	}
@@ -270,5 +270,56 @@ func TestClientReconnectBackoffResetsAfterCleanClose(t *testing.T) {
 
 	if got := connections.Load(); got < 7 {
 		t.Fatalf("expected frequent reconnects after clean closes, got %d connections", got)
+	}
+}
+
+func TestClientDoesNotReconnectWhileIdle(t *testing.T) {
+	var connections atomic.Int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		connections.Add(1)
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client, err := NewClient(ClientConfig{
+		ServerURL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+		APIKey:            "dk_idle_no_reconnect",
+		ProtocolVersion:   DefaultProtocolVersion,
+		Logger:            slog.Default(),
+		HeartbeatInterval: time.Hour,
+		InitialReconnect:  10 * time.Millisecond,
+		MaxReconnectWait:  50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- client.Run(ctx) }()
+
+	time.Sleep(6500 * time.Millisecond)
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 websocket connection while idle, got %d", got)
+	}
+
+	cancel()
+	select {
+	case runErr := <-errCh:
+		if runErr != nil {
+			t.Fatalf("client run returned error: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for client to stop")
 	}
 }

@@ -62,6 +62,27 @@ make build-artifacts
 make checksums
 ```
 
+## Website Installer Releases
+
+`distil-app` `/install` uses these artifacts when running in development:
+
+```bash
+dist/distil-proxy-darwin-amd64
+dist/distil-proxy-darwin-arm64
+dist/distil-proxy-linux-amd64
+dist/distil-proxy-linux-arm64
+dist/distil-proxy-windows-amd64.exe
+dist/distil-proxy-windows-arm64.exe
+```
+
+After changing CLI output or runtime behavior, rebuild before testing installer flows:
+
+```bash
+make build-artifacts
+```
+
+For non-development environments, `distil-app/config/proxy_releases.json` must be updated to the new GitHub release URLs and checksums, or installs will keep pulling older binaries.
+
 ## Project Layout
 
 ```text

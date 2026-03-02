@@ -69,9 +69,20 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid key prefix",
+			name: "valid proxy key prefix",
 			cfg: Config{
 				APIKey:            "dpk_abc123",
+				Server:            DefaultServerURL,
+				TimeoutMS:         1000,
+				LogLevel:          "info",
+				UpgradeCheckHours: 6,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid key prefix",
+			cfg: Config{
+				APIKey:            "xk_abc123",
 				Server:            DefaultServerURL,
 				TimeoutMS:         1000,
 				LogLevel:          "info",
@@ -280,6 +291,9 @@ func TestDetectPathsHomeError(t *testing.T) {
 func TestValidateAPIKey(t *testing.T) {
 	if err := ValidateAPIKey("dk_valid"); err != nil {
 		t.Fatalf("expected valid key, got %v", err)
+	}
+	if err := ValidateAPIKey("dpk_valid"); err != nil {
+		t.Fatalf("expected valid proxy key, got %v", err)
 	}
 	if err := ValidateAPIKey("dk_"); err == nil {
 		t.Fatal("expected error for short key")

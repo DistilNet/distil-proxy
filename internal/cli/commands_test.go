@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,10 @@ import (
 )
 
 func runCLI(t *testing.T, home string, args ...string) (string, error) {
+	return runCLIWithInput(t, home, "", args...)
+}
+
+func runCLIWithInput(t *testing.T, home string, input string, args ...string) (string, error) {
 	t.Helper()
 	t.Setenv("HOME", home)
 
@@ -20,6 +26,7 @@ func runCLI(t *testing.T, home string, args ...string) (string, error) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(input))
 	cmd.SetArgs(args)
 
 	err := cmd.Execute()
@@ -43,6 +50,97 @@ func TestAuthCommand(t *testing.T) {
 	}
 	if cfg.APIKey != "dk_auth_test" {
 		t.Fatalf("expected api key saved, got %+v", cfg)
+	}
+}
+
+func TestAuthCommandInteractiveUsesVerificationFlow(t *testing.T) {
+	home := t.TempDir()
+	var keyEndpointCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/install/register":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"code_sent"}`))
+		case "/api/v1/install/verify":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"verified","email":"cli@example.com","api_key":"dk_user_key","proxy_key":"dpk_daemon_key"}`))
+		case "/api/v1/install/key":
+			keyEndpointCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"authenticated","email":"cli@example.com"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("DISTIL_AUTH_BASE_URL", server.URL)
+
+	out, err := runCLIWithInput(t, home, "cli@example.com\n123456\n", "auth")
+	if err != nil {
+		t.Fatalf("interactive auth command error: %v", err)
+	}
+	if keyEndpointCalled {
+		t.Fatal("expected key endpoint to be skipped when email is provided")
+	}
+	if !strings.Contains(out, "updated config") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+
+	paths := config.DefaultPaths(home)
+	cfg, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.APIKey != "dk_user_key" {
+		t.Fatalf("expected api key saved (preferred over proxy_key), got %+v", cfg)
+	}
+}
+
+func TestAuthCommandInteractiveWithExistingAPIKeyStillRequiresCode(t *testing.T) {
+	home := t.TempDir()
+	var (
+		keyEndpointCalled      bool
+		registerEndpointCalled bool
+		verifyEndpointCalled   bool
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/install/key":
+			keyEndpointCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"authenticated","email":"key-owner@example.com"}`))
+		case "/api/v1/install/register":
+			registerEndpointCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"code_sent"}`))
+		case "/api/v1/install/verify":
+			verifyEndpointCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"verified","email":"key-owner@example.com","api_key":"dk_user_key","proxy_key":"dpk_proxy_key"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("DISTIL_AUTH_BASE_URL", server.URL)
+
+	_, err := runCLIWithInput(t, home, "dk_existing_key\n654321\n", "auth")
+	if err != nil {
+		t.Fatalf("interactive auth command error: %v", err)
+	}
+	if !keyEndpointCalled || !registerEndpointCalled || !verifyEndpointCalled {
+		t.Fatalf("expected key/register/verify endpoints called: key=%t register=%t verify=%t", keyEndpointCalled, registerEndpointCalled, verifyEndpointCalled)
+	}
+
+	paths := config.DefaultPaths(home)
+	cfg, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.APIKey != "dk_user_key" {
+		t.Fatalf("expected api key saved (preferred over proxy_key), got %+v", cfg)
 	}
 }
 
@@ -267,7 +365,7 @@ func TestServiceInstallCommandError(t *testing.T) {
 func TestServiceInstallRequiresConfig(t *testing.T) {
 	home := t.TempDir()
 	_, err := runCLI(t, home, "service", "install")
-	if err == nil || !strings.Contains(err.Error(), "config not found; run 'distil-proxy auth <dk_key>' first") {
+	if err == nil || !strings.Contains(err.Error(), "config not found; run 'distil-proxy auth' first") {
 		t.Fatalf("expected service install config error, got %v", err)
 	}
 }

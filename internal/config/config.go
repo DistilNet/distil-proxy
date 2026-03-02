@@ -148,11 +148,14 @@ func isSupportedLogLevel(level string) bool {
 
 // ValidateAPIKey validates the public API key format.
 func ValidateAPIKey(key string) error {
-	if !strings.HasPrefix(key, "dk_") || len(key) <= len("dk_") {
-		return errors.New("api_key must start with dk_")
+	if strings.HasPrefix(key, "dk_") && len(key) > len("dk_") {
+		return nil
+	}
+	if strings.HasPrefix(key, "dpk_") && len(key) > len("dpk_") {
+		return nil
 	}
 
-	return nil
+	return errors.New("api_key must start with dk_ or dpk_")
 }
 
 // EnsureStateDirs creates runtime directories required by the daemon.
