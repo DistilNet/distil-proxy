@@ -142,6 +142,87 @@ func TestClientRunHandlesFetchAndHeaders(t *testing.T) {
 	}
 }
 
+func TestClientRunHandlesLargeFetchRequestPayload(t *testing.T) {
+	fetcher := &stubFetcher{}
+	doneCh := make(chan struct{}, 1)
+
+	largeHeader := strings.Repeat("a", 40*1024)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+
+		if err := wsjson.Write(r.Context(), conn, FetchRequest{
+			Type:    "fetch",
+			ID:      "job_large",
+			URL:     "https://example.com",
+			Method:  "GET",
+			Headers: map[string]string{"X-Large-Header": largeHeader},
+		}); err != nil {
+			t.Errorf("write large fetch request: %v", err)
+			return
+		}
+
+		var res FetchResult
+		if err := wsjson.Read(r.Context(), conn, &res); err != nil {
+			t.Errorf("read fetch result: %v", err)
+			return
+		}
+		if res.ID != "job_large" {
+			t.Errorf("unexpected result id: %q", res.ID)
+			return
+		}
+		doneCh <- struct{}{}
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client, err := NewClient(ClientConfig{
+		ServerURL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+		APIKey:            "dk_test_large_123",
+		ProtocolVersion:   DefaultProtocolVersion,
+		DefaultTimeoutMS:  1000,
+		Fetcher:           fetcher,
+		Logger:            slog.Default(),
+		HeartbeatInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- client.Run(ctx)
+	}()
+
+	select {
+	case <-doneCh:
+		cancel()
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for large websocket exchange")
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("client run returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for client shutdown")
+	}
+
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+	if got := fetcher.lastReq.Headers["X-Large-Header"]; got != largeHeader {
+		t.Fatalf("expected large header round-trip, got len=%d want=%d", len(got), len(largeHeader))
+	}
+}
+
 func TestNewClientRejectsInvalidKey(t *testing.T) {
 	_, err := NewClient(ClientConfig{ServerURL: "wss://example.com/ws", APIKey: "invalid_bad"})
 	if err == nil {

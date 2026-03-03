@@ -22,6 +22,7 @@ const (
 	defaultConnectTimeout   = 10 * time.Second
 	defaultHeartbeat        = 30 * time.Second
 	defaultMaxReconnectWait = 60 * time.Second
+	defaultReadLimitBytes   = 8 << 20 // 8 MiB: supports large daemon job payloads.
 	defaultWriteTimeout     = 5 * time.Second
 )
 
@@ -142,6 +143,7 @@ func (c *Client) runSession(ctx context.Context) error {
 		return fmt.Errorf("dial websocket: %w", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "shutdown")
+	conn.SetReadLimit(defaultReadLimitBytes)
 
 	c.emitState("connected")
 	c.cfg.Logger.Info("websocket connected")
