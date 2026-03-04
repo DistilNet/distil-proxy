@@ -224,20 +224,30 @@ func runInteractiveAuth(cmd *cobra.Command) error {
 		return fmt.Errorf("verification failed: %w", verifyErr)
 	}
 
-	// Prefer api_key (dk_) since the websocket client requires it for authentication.
-	// Fall back to proxy_key (dpk_) only if api_key is not provided.
-	daemonKey := strings.TrimSpace(verifyResp.APIKey)
+	// Prefer proxy_key (dpk_) for daemon authentication because it maps to
+	// a manageable proxy credential in distil-app.
+	daemonKey := strings.TrimSpace(verifyResp.Proxy)
 	if daemonKey == "" {
-		daemonKey = strings.TrimSpace(verifyResp.Proxy)
+		daemonKey = strings.TrimSpace(verifyResp.APIKey)
 	}
 	if daemonKey == "" {
 		return errors.New("verification succeeded but no daemon key was returned")
 	}
 
-	return saveAuthKey(cmd, daemonKey)
+	// Keep post-auth verification fetches on api_key (dk_) when available.
+	verificationKey := strings.TrimSpace(verifyResp.APIKey)
+	if verificationKey == "" {
+		verificationKey = daemonKey
+	}
+
+	return saveAuthKeyWithVerificationKey(cmd, daemonKey, verificationKey)
 }
 
 func saveAuthKey(cmd *cobra.Command, key string) error {
+	return saveAuthKeyWithVerificationKey(cmd, key, "")
+}
+
+func saveAuthKeyWithVerificationKey(cmd *cobra.Command, key string, verificationKey string) error {
 	apiKey := strings.TrimSpace(key)
 	if err := config.ValidateAPIKey(apiKey); err != nil {
 		return err
@@ -260,13 +270,17 @@ func saveAuthKey(cmd *cobra.Command, key string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "updated config: %s\n", paths.ConfigFile)
 	cfg.ApplyDefaults()
-	if err := postAuthFinalizeFunc(cmd, paths, cfg); err != nil {
+	fetchKey := strings.TrimSpace(verificationKey)
+	if fetchKey == "" {
+		fetchKey = apiKey
+	}
+	if err := postAuthFinalizeFunc(cmd, paths, cfg, fetchKey); err != nil {
 		return err
 	}
 	return nil
 }
 
-func postAuthFinalize(cmd *cobra.Command, paths config.Paths, cfg config.Config) error {
+func postAuthFinalize(cmd *cobra.Command, paths config.Paths, cfg config.Config, verificationKey string) error {
 	if err := postAuthRestartFunc(paths, cfg); err != nil {
 		return fmt.Errorf("restart daemon with updated auth: %w", err)
 	}
@@ -277,7 +291,7 @@ func postAuthFinalize(cmd *cobra.Command, paths config.Paths, cfg config.Config)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "daemon websocket connected")
 
-	source, err := runVerificationFetch(cfg.Server, cfg.APIKey)
+	source, err := runVerificationFetch(cfg.Server, verificationKey)
 	if err != nil {
 		return err
 	}

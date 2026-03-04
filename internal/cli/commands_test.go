@@ -27,7 +27,7 @@ func runCLIWithInput(t *testing.T, home string, input string, args ...string) (s
 	t.Setenv("HOME", home)
 	if _, ok := os.LookupEnv("DISTIL_TEST_REAL_POST_AUTH"); !ok {
 		origPostAuthFinalize := postAuthFinalizeFunc
-		postAuthFinalizeFunc = func(_ *cobra.Command, _ config.Paths, _ config.Config) error { return nil }
+		postAuthFinalizeFunc = func(_ *cobra.Command, _ config.Paths, _ config.Config, _ string) error { return nil }
 		t.Cleanup(func() { postAuthFinalizeFunc = origPostAuthFinalize })
 	}
 
@@ -241,8 +241,8 @@ func TestAuthCommandInteractiveUsesVerificationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.APIKey != "dk_user_key" {
-		t.Fatalf("expected api key saved (preferred over proxy_key), got %+v", cfg)
+	if cfg.APIKey != "dpk_daemon_key" {
+		t.Fatalf("expected proxy key saved for daemon auth, got %+v", cfg)
 	}
 }
 
@@ -288,8 +288,82 @@ func TestAuthCommandInteractiveWithExistingAPIKeyStillRequiresCode(t *testing.T)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	if cfg.APIKey != "dk_user_key" {
-		t.Fatalf("expected api key saved (preferred over proxy_key), got %+v", cfg)
+	if cfg.APIKey != "dpk_proxy_key" {
+		t.Fatalf("expected proxy key saved for daemon auth, got %+v", cfg)
+	}
+}
+
+func TestAuthCommandInteractiveSavesProxyKeyAndVerifiesWithAPIKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DISTIL_TEST_REAL_POST_AUTH", "1")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/install/register":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"code_sent"}`))
+		case "/api/v1/install/verify":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"verified","email":"cli@example.com","api_key":"dk_user_key","proxy_key":"dpk_daemon_key"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("DISTIL_AUTH_BASE_URL", server.URL)
+
+	origRestart := postAuthRestartFunc
+	origStatus := postAuthStatusFunc
+	origHTTPClient := postAuthHTTPClient
+	t.Cleanup(func() {
+		postAuthRestartFunc = origRestart
+		postAuthStatusFunc = origStatus
+		postAuthHTTPClient = origHTTPClient
+	})
+
+	postAuthRestartFunc = func(_ config.Paths, cfg config.Config) error {
+		if cfg.APIKey != "dpk_daemon_key" {
+			t.Fatalf("expected daemon restart key dpk_daemon_key, got %q", cfg.APIKey)
+		}
+		return nil
+	}
+	postAuthStatusFunc = func(_ config.Paths) (daemon.RuntimeStatus, error) {
+		return daemon.RuntimeStatus{WSState: "connected"}, nil
+	}
+
+	gotAuthHeader := ""
+	postAuthHTTPClient = func(time.Duration) authHTTPDoer {
+		return fakeAuthHTTPDoer{
+			do: func(req *http.Request) (*http.Response, error) {
+				gotAuthHeader = req.Header.Get("X-Distil-Key")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"X-Distil": []string{"true"},
+					},
+					Body: io.NopCloser(strings.NewReader("ok")),
+				}, nil
+			},
+		}
+	}
+
+	out, err := runCLIWithInput(t, home, "cli@example.com\n123456\n", "auth")
+	if err != nil {
+		t.Fatalf("interactive auth command error: %v", err)
+	}
+	if gotAuthHeader != "dk_user_key" {
+		t.Fatalf("expected verification fetch to use api key dk_user_key, got %q", gotAuthHeader)
+	}
+	if !strings.Contains(out, "verification fetch succeeded") {
+		t.Fatalf("expected verification fetch output, got %q", out)
+	}
+
+	cfg, err := config.Load(config.DefaultPaths(home))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.APIKey != "dpk_daemon_key" {
+		t.Fatalf("expected saved daemon key dpk_daemon_key, got %+v", cfg)
 	}
 }
 
