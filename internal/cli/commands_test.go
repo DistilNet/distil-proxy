@@ -3,15 +3,19 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distilnet/distil-proxy/internal/config"
+	"github.com/distilnet/distil-proxy/internal/daemon"
 	"github.com/distilnet/distil-proxy/internal/version"
+	"github.com/spf13/cobra"
 )
 
 func runCLI(t *testing.T, home string, args ...string) (string, error) {
@@ -21,6 +25,11 @@ func runCLI(t *testing.T, home string, args ...string) (string, error) {
 func runCLIWithInput(t *testing.T, home string, input string, args ...string) (string, error) {
 	t.Helper()
 	t.Setenv("HOME", home)
+	if _, ok := os.LookupEnv("DISTIL_TEST_REAL_POST_AUTH"); !ok {
+		origPostAuthFinalize := postAuthFinalizeFunc
+		postAuthFinalizeFunc = func(_ *cobra.Command, _ config.Paths, _ config.Config) error { return nil }
+		t.Cleanup(func() { postAuthFinalizeFunc = origPostAuthFinalize })
+	}
 
 	cmd := NewRootCmd(version.DefaultInfo())
 	var out bytes.Buffer
@@ -31,6 +40,14 @@ func runCLIWithInput(t *testing.T, home string, input string, args ...string) (s
 
 	err := cmd.Execute()
 	return out.String(), err
+}
+
+type fakeAuthHTTPDoer struct {
+	do func(*http.Request) (*http.Response, error)
+}
+
+func (f fakeAuthHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	return f.do(req)
 }
 
 func TestAuthCommand(t *testing.T) {
@@ -50,6 +67,138 @@ func TestAuthCommand(t *testing.T) {
 	}
 	if cfg.APIKey != "dk_auth_test" {
 		t.Fatalf("expected api key saved, got %+v", cfg)
+	}
+}
+
+func TestAuthCommandPerformsRestartAndVerificationFetch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DISTIL_TEST_REAL_POST_AUTH", "1")
+
+	origRestart := postAuthRestartFunc
+	origStatus := postAuthStatusFunc
+	origSleep := postAuthSleepFunc
+	origHTTPClient := postAuthHTTPClient
+	t.Cleanup(func() {
+		postAuthRestartFunc = origRestart
+		postAuthStatusFunc = origStatus
+		postAuthSleepFunc = origSleep
+		postAuthHTTPClient = origHTTPClient
+	})
+
+	restartCalled := false
+	postAuthRestartFunc = func(_ config.Paths, cfg config.Config) error {
+		restartCalled = true
+		if cfg.APIKey != "dk_auth_test" {
+			t.Fatalf("expected auth key for restart, got %q", cfg.APIKey)
+		}
+		return nil
+	}
+
+	statusCalls := 0
+	postAuthStatusFunc = func(_ config.Paths) (daemon.RuntimeStatus, error) {
+		statusCalls++
+		if statusCalls == 1 {
+			return daemon.RuntimeStatus{WSState: "reconnecting"}, nil
+		}
+		return daemon.RuntimeStatus{WSState: "connected"}, nil
+	}
+
+	postAuthSleepFunc = func(time.Duration) {}
+
+	var (
+		gotRequestURL string
+		gotAuthHeader string
+	)
+	postAuthHTTPClient = func(timeout time.Duration) authHTTPDoer {
+		if timeout != postAuthFetchTimeout {
+			t.Fatalf("expected timeout %s, got %s", postAuthFetchTimeout, timeout)
+		}
+		return fakeAuthHTTPDoer{
+			do: func(req *http.Request) (*http.Response, error) {
+				gotRequestURL = req.URL.String()
+				gotAuthHeader = req.Header.Get("X-Distil-Key")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"X-Distil":        []string{"true"},
+						"X-Distil-Source": []string{"proxy"},
+					},
+					Body: io.NopCloser(strings.NewReader("ok")),
+				}, nil
+			},
+		}
+	}
+
+	out, err := runCLI(t, home, "auth", "dk_auth_test")
+	if err != nil {
+		t.Fatalf("auth command error: %v", err)
+	}
+
+	if !restartCalled {
+		t.Fatal("expected auth to restart daemon")
+	}
+	if gotRequestURL != "https://proxy.distil.net/https://example.com" {
+		t.Fatalf("unexpected verification fetch URL: %q", gotRequestURL)
+	}
+	if gotAuthHeader != "dk_auth_test" {
+		t.Fatalf("expected verification fetch to use auth key, got %q", gotAuthHeader)
+	}
+	if !strings.Contains(out, "restarted daemon with updated auth") {
+		t.Fatalf("expected restart output, got %q", out)
+	}
+	if !strings.Contains(out, "daemon websocket connected") {
+		t.Fatalf("expected connected output, got %q", out)
+	}
+	if !strings.Contains(out, "verification fetch succeeded") {
+		t.Fatalf("expected verification fetch output, got %q", out)
+	}
+}
+
+func TestAuthCommandReturnsErrorWhenVerificationFetchFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DISTIL_TEST_REAL_POST_AUTH", "1")
+
+	origRestart := postAuthRestartFunc
+	origStatus := postAuthStatusFunc
+	origHTTPClient := postAuthHTTPClient
+	t.Cleanup(func() {
+		postAuthRestartFunc = origRestart
+		postAuthStatusFunc = origStatus
+		postAuthHTTPClient = origHTTPClient
+	})
+
+	postAuthRestartFunc = func(_ config.Paths, _ config.Config) error { return nil }
+	postAuthStatusFunc = func(_ config.Paths) (daemon.RuntimeStatus, error) {
+		return daemon.RuntimeStatus{WSState: "connected"}, nil
+	}
+	postAuthHTTPClient = func(time.Duration) authHTTPDoer {
+		return fakeAuthHTTPDoer{
+			do: func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Body:       io.NopCloser(strings.NewReader("invalid api key")),
+				}, nil
+			},
+		}
+	}
+
+	out, err := runCLI(t, home, "auth", "dk_auth_test")
+	if err == nil {
+		t.Fatal("expected auth command error when verification fetch fails")
+	}
+	if !strings.Contains(err.Error(), "verification fetch failed with status 401") {
+		t.Fatalf("unexpected auth command error: %v", err)
+	}
+	if !strings.Contains(out, "updated config") {
+		t.Fatalf("expected config update output before failure, got %q", out)
+	}
+
+	cfg, loadErr := config.Load(config.DefaultPaths(home))
+	if loadErr != nil {
+		t.Fatalf("expected config written before verification failure: %v", loadErr)
+	}
+	if cfg.APIKey != "dk_auth_test" {
+		t.Fatalf("expected api key persisted despite verification failure, got %+v", cfg)
 	}
 }
 

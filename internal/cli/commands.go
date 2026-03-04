@@ -137,6 +137,28 @@ type installErrorResponse struct {
 	Error string `json:"error"`
 }
 
+const (
+	postAuthConnectTimeout      = 20 * time.Second
+	postAuthConnectPollInterval = 500 * time.Millisecond
+	postAuthFetchTimeout        = 20 * time.Second
+	postAuthProbeTargetURL      = "https://example.com"
+)
+
+type authHTTPDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+var (
+	postAuthFinalizeFunc = postAuthFinalize
+	postAuthRestartFunc  = daemon.Restart
+	postAuthStatusFunc   = daemon.Status
+	postAuthSleepFunc    = time.Sleep
+	postAuthNowFunc      = time.Now
+	postAuthHTTPClient   = func(timeout time.Duration) authHTTPDoer {
+		return &http.Client{Timeout: timeout}
+	}
+)
+
 func runInteractiveAuth(cmd *cobra.Command) error {
 	paths, err := config.DetectPaths()
 	if err != nil {
@@ -237,7 +259,125 @@ func saveAuthKey(cmd *cobra.Command, key string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "updated config: %s\n", paths.ConfigFile)
+	cfg.ApplyDefaults()
+	if err := postAuthFinalizeFunc(cmd, paths, cfg); err != nil {
+		return err
+	}
 	return nil
+}
+
+func postAuthFinalize(cmd *cobra.Command, paths config.Paths, cfg config.Config) error {
+	if err := postAuthRestartFunc(paths, cfg); err != nil {
+		return fmt.Errorf("restart daemon with updated auth: %w", err)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "restarted daemon with updated auth")
+
+	if err := waitForDaemonConnected(paths, postAuthConnectTimeout, postAuthConnectPollInterval); err != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "daemon websocket connected")
+
+	source, err := runVerificationFetch(cfg.Server, cfg.APIKey)
+	if err != nil {
+		return err
+	}
+	if source != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "verification fetch succeeded (source: %s)\n", source)
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "verification fetch succeeded")
+	}
+
+	return nil
+}
+
+func waitForDaemonConnected(paths config.Paths, timeout, pollInterval time.Duration) error {
+	deadline := postAuthNowFunc().Add(timeout)
+	lastState := ""
+	lastError := ""
+
+	for {
+		status, err := postAuthStatusFunc(paths)
+		if err != nil {
+			lastError = err.Error()
+		} else {
+			lastState = strings.TrimSpace(status.WSState)
+			if lastState == "connected" {
+				return nil
+			}
+			if msg := strings.TrimSpace(status.LastError); msg != "" {
+				lastError = msg
+			}
+		}
+
+		if !postAuthNowFunc().Before(deadline) {
+			break
+		}
+		postAuthSleepFunc(pollInterval)
+	}
+
+	if lastError != "" {
+		return fmt.Errorf("daemon did not reconnect within %s (last_state=%q, last_error=%s)", timeout, lastState, lastError)
+	}
+	return fmt.Errorf("daemon did not reconnect within %s (last_state=%q)", timeout, lastState)
+}
+
+func runVerificationFetch(serverURL, apiKey string) (string, error) {
+	requestURL := strings.TrimRight(proxyHTTPBaseURL(serverURL), "/") + "/" + postAuthProbeTargetURL
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build verification fetch request: %w", err)
+	}
+	req.Header.Set("X-Distil-Key", apiKey)
+	req.Header.Set("X-Distil-No-Cache", "true")
+	req.Header.Set("Accept", "text/markdown")
+
+	resp, err := postAuthHTTPClient(postAuthFetchTimeout).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("verification fetch request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		msg := strings.TrimSpace(string(body))
+		if msg != "" {
+			return "", fmt.Errorf("verification fetch failed with status %d: %s", resp.StatusCode, msg)
+		}
+		return "", fmt.Errorf("verification fetch failed with status %d", resp.StatusCode)
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Distil")), "true") {
+		return "", errors.New("verification fetch succeeded but response did not include X-Distil=true")
+	}
+
+	return strings.TrimSpace(resp.Header.Get("X-Distil-Source")), nil
+}
+
+func proxyHTTPBaseURL(serverURL string) string {
+	const defaultProxyBaseURL = "https://proxy.distil.net"
+
+	u, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil || u == nil || strings.TrimSpace(u.Host) == "" {
+		return defaultProxyBaseURL
+	}
+
+	switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	case "http", "https":
+		// keep as-is
+	default:
+		u.Scheme = "https"
+	}
+
+	u.Path = ""
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+
+	return strings.TrimRight(u.String(), "/")
 }
 
 func readPromptLine(reader *bufio.Reader, out io.Writer, prompt string) (string, error) {
