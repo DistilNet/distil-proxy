@@ -8,6 +8,7 @@ Public Go daemon for Distil proxy routing.
 
 - `dk_` API key based auth (single credential model)
 - daemon lifecycle commands: `start`, `stop`, `restart`, `status`, `uninstall`
+- manual binary upgrade command: `upgrade` (with daemon post-upgrade hook)
 - service manager helpers: `service install`, `service uninstall`
 - foreground mode for service managers: `start --foreground`
 - bounded fetch execution with timeout + max response size guardrails
@@ -28,6 +29,7 @@ This installs the binary to `~/.distil-proxy/bin/distil-proxy`.
 ```bash
 distil-proxy auth dk_your_api_key
 distil-proxy start
+distil-proxy upgrade
 distil-proxy status
 distil-proxy logs -n 50
 distil-proxy service install
