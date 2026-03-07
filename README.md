@@ -102,3 +102,7 @@ internal/platform       # launchd/systemd helpers
 ## Status
 
 This repository is under active development. Interfaces may change before first stable release.
+
+## License
+
+O'SaaSy License. See [LICENSE.md](LICENSE.md).
