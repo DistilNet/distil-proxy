@@ -52,8 +52,12 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist
+          VERSION="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
+          COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo none)"
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LDFLAGS="-X github.com/distilnet/distil-proxy/internal/version.version=${VERSION} -X github.com/distilnet/distil-proxy/internal/version.commit=${COMMIT} -X github.com/distilnet/distil-proxy/internal/version.date=${BUILD_DATE}"
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -o dist/distil-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/distil-proxy
+            go build -trimpath -ldflags "${LDFLAGS}" -o dist/distil-proxy-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/distil-proxy
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
