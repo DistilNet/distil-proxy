@@ -285,10 +285,13 @@ func saveAuthKeyWithEmail(cmd *cobra.Command, key string, email string) error {
 		cfg = config.Config{}
 	}
 	cfg.ApplyDefaults()
+	previousAPIKey := strings.TrimSpace(cfg.APIKey)
 
 	cfg.APIKey = apiKey
 	if resolvedEmail := strings.TrimSpace(email); resolvedEmail != "" {
 		cfg.Email = resolvedEmail
+	} else if previousAPIKey != "" && previousAPIKey != apiKey {
+		cfg.Email = ""
 	}
 	if err := config.Save(paths, cfg); err != nil {
 		return err

@@ -303,6 +303,32 @@ func TestAuthRejectsInvalidKey(t *testing.T) {
 	}
 }
 
+func TestAuthCommandClearsCachedEmailWhenAPIKeyChanges(t *testing.T) {
+	home := t.TempDir()
+	paths := config.DefaultPaths(home)
+	if err := config.Save(paths, config.Config{
+		APIKey: "dk_original_key",
+		Email:  "original@example.com",
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	if _, err := runCLI(t, home, "auth", "dk_replacement_key"); err != nil {
+		t.Fatalf("auth command error: %v", err)
+	}
+
+	cfg, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.APIKey != "dk_replacement_key" {
+		t.Fatalf("expected replacement api key, got %+v", cfg)
+	}
+	if cfg.Email != "" {
+		t.Fatalf("expected cached email cleared after key change, got %+v", cfg)
+	}
+}
+
 func TestAuthRepairsInvalidExistingConfig(t *testing.T) {
 	cases := []struct {
 		name    string
