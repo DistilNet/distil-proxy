@@ -23,6 +23,7 @@ func NewRootCmd(info version.Info) *cobra.Command {
 	cmd.AddCommand(newRestartCmd())
 	cmd.AddCommand(newStatusCmd(info))
 	cmd.AddCommand(newAuthCmd())
+	cmd.AddCommand(newDashboardCmd())
 	cmd.AddCommand(newLogsCmd())
 	cmd.AddCommand(newServiceCmd())
 	cmd.AddCommand(newUninstallCmd())

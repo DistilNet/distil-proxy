@@ -38,6 +38,7 @@ const (
 // Config defines persisted daemon configuration.
 type Config struct {
 	APIKey            string `json:"api_key"`
+	Email             string `json:"email,omitempty"`
 	LegacyProxyKey    string `json:"proxy_key,omitempty"`
 	Server            string `json:"server,omitempty"`
 	TimeoutMS         int    `json:"timeout_ms,omitempty"`

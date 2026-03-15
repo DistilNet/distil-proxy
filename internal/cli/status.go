@@ -69,6 +69,7 @@ type statusOutput struct {
 	UptimeSeconds int64           `json:"uptime_seconds"`
 	UptimeHuman   string          `json:"uptime_human"`
 	StartTime     string          `json:"start_time"`
+	Email         string          `json:"email,omitempty"`
 	Location      statusLocation  `json:"location"`
 	WebSocket     statusWebSocket `json:"websocket"`
 	Jobs          statusJobs      `json:"jobs"`
@@ -101,7 +102,14 @@ func newStatusCmd(info version.Info) *cobra.Command {
 			}
 			cfg.ApplyDefaults()
 
-			out := buildStatusOutput(info.Version, cfg.Server, status, statusNowFunc())
+			accountEmail := strings.TrimSpace(cfg.Email)
+			if cfgErr == nil && accountEmail == "" && strings.TrimSpace(cfg.APIKey) != "" {
+				if account, lookupErr := lookupAccountForConfig(paths, &cfg, statusAccountLookupTimeout); lookupErr == nil {
+					accountEmail = strings.TrimSpace(account.Email)
+				}
+			}
+
+			out := buildStatusOutput(info.Version, cfg.Server, accountEmail, status, statusNowFunc())
 			if asJSON {
 				enc := json.NewEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
@@ -116,7 +124,7 @@ func newStatusCmd(info version.Info) *cobra.Command {
 	return cmd
 }
 
-func buildStatusOutput(versionStr string, websocketURL string, status daemon.RuntimeStatus, now time.Time) statusOutput {
+func buildStatusOutput(versionStr string, websocketURL string, email string, status daemon.RuntimeStatus, now time.Time) statusOutput {
 	uptimeSeconds := status.UptimeSeconds
 	if uptimeSeconds < 0 {
 		uptimeSeconds = 0
@@ -152,6 +160,7 @@ func buildStatusOutput(versionStr string, websocketURL string, status daemon.Run
 		UptimeSeconds: uptimeSeconds,
 		UptimeHuman:   humanDuration(uptimeSeconds),
 		StartTime:     startLocal.Format(time.RFC3339),
+		Email:         strings.TrimSpace(email),
 		Location: statusLocation{
 			City:    defaultNodeCity,
 			Country: defaultNodeCountry,
@@ -192,6 +201,11 @@ func renderStatusHuman(w io.Writer, out statusOutput, useColor bool) {
 	printField(w, "Status:", fmt.Sprintf("%-18s %s", stateText+" "+statusIcon, statusHint))
 	printField(w, "PID:", fmt.Sprintf("%d", out.PID))
 	printField(w, "Uptime:", fmt.Sprintf("%s (since %s)", out.UptimeHuman, out.StartTimeHuman))
+	accountText := out.Email
+	if accountText == "" {
+		accountText = "unavailable"
+	}
+	printField(w, "Account:", accountText)
 	printField(w, "Your Node:", fmt.Sprintf("%s, %s (%s IP active when connected)", out.Location.City, out.Location.Country, out.Location.Type))
 	fmt.Fprintln(w)
 
@@ -223,7 +237,7 @@ func renderStatusHuman(w io.Writer, out statusOutput, useColor bool) {
 	fmt.Fprintln(w, colorize("Quick tips:", ansiBold+ansiCyan, useColor))
 	fmt.Fprintln(w, "  • Run 'distil-proxy logs' to see detailed logs")
 	fmt.Fprintln(w, "  • Run 'distil fetch https://example.com' to test a request")
-	fmt.Fprintln(w, "  • Check dashboard: https://distil.net/account")
+	fmt.Fprintln(w, "  • Run 'distil-proxy dashboard' to sign in to your dashboard")
 
 	if out.Status == "reconnecting" || out.Status == "disconnected" || out.Status == "error" {
 		fmt.Fprintln(w)
