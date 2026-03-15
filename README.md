@@ -31,6 +31,7 @@ distil-proxy auth dk_your_api_key
 distil-proxy start
 distil-proxy upgrade
 distil-proxy status
+distil-proxy dashboard
 distil-proxy logs -n 50
 distil-proxy service install
 distil-proxy stop
