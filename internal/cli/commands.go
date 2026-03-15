@@ -22,6 +22,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	accountLookupTimeout       = 5 * time.Second
+	statusAccountLookupTimeout = 3 * time.Second
+)
+
+var openBrowserFunc = platform.OpenBrowser
+
 func newStartCmd() *cobra.Command {
 	var foreground bool
 
@@ -126,11 +133,54 @@ func newAuthCmd() *cobra.Command {
 	}
 }
 
+func newDashboardCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "dashboard",
+		Short: "Open the Distil dashboard with a magic-link session",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			paths, err := config.DetectPaths()
+			if err != nil {
+				return err
+			}
+
+			cfg, err := config.Load(paths)
+			if err != nil {
+				if errors.Is(err, config.ErrConfigNotFound) {
+					return errors.New("config not found; run 'distil-proxy auth' first")
+				}
+				return err
+			}
+			cfg.ApplyDefaults()
+
+			account, err := lookupAccountForConfig(paths, &cfg, accountLookupTimeout)
+			if err != nil {
+				return fmt.Errorf("dashboard login failed: %w", err)
+			}
+
+			dashboardURL := buildDashboardURL(resolveAuthBaseURL(cfg.Server), account.MagicLinkToken)
+			email := strings.TrimSpace(account.Email)
+			if email == "" {
+				email = "your account"
+			}
+
+			if err := openBrowserFunc(dashboardURL); err != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Could not open a browser automatically for %s.\n", email)
+				fmt.Fprintf(cmd.OutOrStdout(), "Open this secure login URL manually:\n%s\n", dashboardURL)
+				return nil
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Opening dashboard for %s\n", email)
+			return nil
+		},
+	}
+}
+
 type installAuthResponse struct {
-	Status string `json:"status"`
-	Email  string `json:"email"`
-	APIKey string `json:"api_key"`
-	Proxy  string `json:"proxy_key"`
+	Status         string `json:"status"`
+	Email          string `json:"email"`
+	APIKey         string `json:"api_key"`
+	Proxy          string `json:"proxy_key"`
+	MagicLinkToken string `json:"magic_link_token"`
 }
 
 type installErrorResponse struct {
@@ -212,10 +262,14 @@ func runInteractiveAuth(cmd *cobra.Command) error {
 		return errors.New("verification succeeded but no daemon key was returned")
 	}
 
-	return saveAuthKey(cmd, daemonKey)
+	return saveAuthKeyWithEmail(cmd, daemonKey, verifyResp.Email)
 }
 
 func saveAuthKey(cmd *cobra.Command, key string) error {
+	return saveAuthKeyWithEmail(cmd, key, "")
+}
+
+func saveAuthKeyWithEmail(cmd *cobra.Command, key string, email string) error {
 	apiKey := strings.TrimSpace(key)
 	if err := config.ValidateAPIKey(apiKey); err != nil {
 		return err
@@ -230,8 +284,12 @@ func saveAuthKey(cmd *cobra.Command, key string) error {
 	if err != nil {
 		cfg = config.Config{}
 	}
+	cfg.ApplyDefaults()
 
 	cfg.APIKey = apiKey
+	if resolvedEmail := strings.TrimSpace(email); resolvedEmail != "" {
+		cfg.Email = resolvedEmail
+	}
 	if err := config.Save(paths, cfg); err != nil {
 		return err
 	}
@@ -252,6 +310,46 @@ func readPromptLine(reader *bufio.Reader, out io.Writer, prompt string) (string,
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+func lookupAccountForConfig(paths config.Paths, cfg *config.Config, timeout time.Duration) (installAuthResponse, error) {
+	account, err := lookupAccountByAPIKey(cfg.Server, cfg.APIKey, timeout)
+	if err != nil {
+		return installAuthResponse{}, err
+	}
+
+	email := strings.TrimSpace(account.Email)
+	if email != "" && email != strings.TrimSpace(cfg.Email) {
+		cfg.Email = email
+		_ = config.Save(paths, *cfg)
+	}
+
+	return account, nil
+}
+
+func lookupAccountByAPIKey(server string, apiKey string, timeout time.Duration) (installAuthResponse, error) {
+	return postInstallJSONWithTimeout(
+		resolveAuthBaseURL(server),
+		"/api/v1/install/key",
+		map[string]string{"api_key": strings.TrimSpace(apiKey)},
+		timeout,
+	)
+}
+
+func buildDashboardURL(baseURL string, magicLinkToken string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://distil.net"
+	}
+
+	if strings.TrimSpace(magicLinkToken) == "" {
+		return baseURL + "/account"
+	}
+
+	query := url.Values{}
+	query.Set("token", magicLinkToken)
+	query.Set("next", "/account")
+	return baseURL + "/login/verify?" + query.Encode()
 }
 
 func resolveAuthBaseURL(server string) string {
@@ -284,6 +382,10 @@ func resolveAuthBaseURL(server string) string {
 }
 
 func postInstallJSON(baseURL, path string, payload map[string]string) (installAuthResponse, error) {
+	return postInstallJSONWithTimeout(baseURL, path, payload, 20*time.Second)
+}
+
+func postInstallJSONWithTimeout(baseURL, path string, payload map[string]string, timeout time.Duration) (installAuthResponse, error) {
 	requestURL := strings.TrimRight(baseURL, "/") + path
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -296,7 +398,7 @@ func postInstallJSON(baseURL, path string, payload map[string]string) (installAu
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return installAuthResponse{}, err

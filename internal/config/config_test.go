@@ -140,7 +140,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	home := t.TempDir()
 	paths := DefaultPaths(home)
 
-	cfg := Config{APIKey: "dk_roundtrip"}
+	cfg := Config{APIKey: "dk_roundtrip", Email: "roundtrip@example.com"}
 	if err := Save(paths, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -152,6 +152,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 	if loaded.APIKey != cfg.APIKey {
 		t.Fatalf("expected api key %q, got %q", cfg.APIKey, loaded.APIKey)
+	}
+	if loaded.Email != cfg.Email {
+		t.Fatalf("expected email %q, got %q", cfg.Email, loaded.Email)
 	}
 	if loaded.Server != DefaultServerURL {
 		t.Fatalf("expected default server %q, got %q", DefaultServerURL, loaded.Server)
