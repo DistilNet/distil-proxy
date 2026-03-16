@@ -61,6 +61,7 @@ make test-race
 make build
 make build-artifacts
 make checksums
+make sync-public-release RELEASE_TAG=v1.7.3
 ```
 
 ## Website Installer Releases
@@ -82,7 +83,18 @@ After changing CLI output or runtime behavior, rebuild before testing installer 
 make build-artifacts
 ```
 
-For non-development environments, `distil-app/config/proxy_releases.json` must be updated to the new GitHub release URLs and checksums, or installs will keep pulling older binaries.
+For non-development environments, `distil-app/config/proxy_releases.json` is the source of truth for the proxy version and checksums. The app derives download URLs from that manifest and always targets the public `DistilNet/distil-proxy` repo.
+
+Release checklist:
+
+```bash
+make build-artifacts
+make checksums
+make sync-public-release RELEASE_TAG=v1.7.3
+gh release create v1.7.3 --repo DistilNet/distil-proxy dist/* dist/SHA256SUMS --title v1.7.3
+```
+
+Only after the public `DistilNet/distil-proxy` tag and assets are live should you bump `distil-app/config/proxy_releases.json` with the new `current.version` and `sha256` values. That keeps the manifest version, public source, and downloadable assets aligned.
 
 ## Project Layout
 

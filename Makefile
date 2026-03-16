@@ -4,6 +4,7 @@ CMD_PATH ?= ./cmd/distil-proxy
 BIN_DIR ?= bin
 DIST_DIR ?= dist
 COVERAGE_FILE ?= coverage.out
+RELEASE_TAG ?=
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -13,7 +14,7 @@ LDFLAGS ?= -X github.com/exec-io/distil-proxy/internal/version.version=$(VERSION
 	-X github.com/exec-io/distil-proxy/internal/version.commit=$(COMMIT) \
 	-X github.com/exec-io/distil-proxy/internal/version.date=$(BUILD_DATE)
 
-.PHONY: build run test test-race lint vuln coverage coverage-check clean build-artifacts install-local checksums
+.PHONY: build run test test-race lint vuln coverage coverage-check clean build-artifacts install-local checksums sync-public-release
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -61,3 +62,6 @@ install-local: build
 
 checksums: build-artifacts
 	cd $(DIST_DIR) && shasum -a 256 $(BINARY)-* > SHA256SUMS
+
+sync-public-release:
+	./scripts/sync-public-release.sh $(RELEASE_TAG)

@@ -55,7 +55,7 @@ func newWSPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 		t.Fatalf("dial websocket: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = clientConn.Close(websocket.StatusNormalClosure, "test done")
+		_ = clientConn.CloseNow()
 	})
 
 	var serverConn *websocket.Conn
@@ -65,7 +65,7 @@ func newWSPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 		t.Fatal("timeout waiting for server websocket")
 	}
 	t.Cleanup(func() {
-		_ = serverConn.Close(websocket.StatusNormalClosure, "test done")
+		_ = serverConn.CloseNow()
 	})
 
 	return clientConn, serverConn
