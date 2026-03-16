@@ -83,7 +83,10 @@ if ! git merge-base --is-ancestor "$PUBLIC_BRANCH_COMMIT" "$COMMIT"; then
   exit 1
 fi
 
-REMOTE_TAG_COMMIT="$(git ls-remote "$PUBLIC_REMOTE_URL" "refs/tags/${TAG}" | awk 'NR==1 { print $1 }')"
+REMOTE_TAG_COMMIT="$(git ls-remote "$PUBLIC_REMOTE_URL" "refs/tags/${TAG}^{}" | awk 'NR==1 { print $1 }')"
+if [[ -z "$REMOTE_TAG_COMMIT" ]]; then
+  REMOTE_TAG_COMMIT="$(git ls-remote "$PUBLIC_REMOTE_URL" "refs/tags/${TAG}" | awk 'NR==1 { print $1 }')"
+fi
 if [[ -n "$REMOTE_TAG_COMMIT" && "$REMOTE_TAG_COMMIT" != "$COMMIT" ]]; then
   echo "public tag ${TAG} already exists at ${REMOTE_TAG_COMMIT}, expected ${COMMIT}" >&2
   exit 1
