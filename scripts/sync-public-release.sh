@@ -52,6 +52,11 @@ if [[ -z "$TAG" ]]; then
   exit 1
 fi
 
+if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+  echo "release tag ${TAG} does not exist locally; create or fetch the exact tag before syncing the public repo" >&2
+  exit 1
+fi
+
 PUBLIC_REMOTE_URL="${PUBLIC_REMOTE_URL:-https://github.com/DistilNet/distil-proxy.git}"
 PUBLIC_RELEASE_REPO="${PUBLIC_RELEASE_REPO:-DistilNet/distil-proxy}"
 PUBLIC_TARGET_BRANCH="${PUBLIC_TARGET_BRANCH:-master}"
