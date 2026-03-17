@@ -97,10 +97,10 @@ if [[ -n "$REMOTE_TAG_COMMIT" && "$REMOTE_TAG_COMMIT" != "$COMMIT" ]]; then
   exit 1
 fi
 
-run git push "$PUBLIC_REMOTE_URL" "${COMMIT}:refs/heads/${PUBLIC_TARGET_BRANCH}"
-
 if [[ -z "$REMOTE_TAG_COMMIT" ]]; then
-  run git push "$PUBLIC_REMOTE_URL" "refs/tags/${TAG}:refs/tags/${TAG}"
+  run git push --atomic "$PUBLIC_REMOTE_URL" "${COMMIT}:refs/heads/${PUBLIC_TARGET_BRANCH}" "refs/tags/${TAG}:refs/tags/${TAG}"
+else
+  run git push "$PUBLIC_REMOTE_URL" "${COMMIT}:refs/heads/${PUBLIC_TARGET_BRANCH}"
 fi
 
 cat <<EOF
