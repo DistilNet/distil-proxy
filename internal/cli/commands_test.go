@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -244,6 +245,9 @@ func TestAuthCommandInteractiveUsesVerificationFlow(t *testing.T) {
 	if cfg.APIKey != "dpk_daemon_key" {
 		t.Fatalf("expected proxy key saved for daemon auth, got %+v", cfg)
 	}
+	if cfg.Email != "cli@example.com" {
+		t.Fatalf("expected email saved, got %+v", cfg)
+	}
 }
 
 func TestAuthCommandInteractiveWithExistingAPIKeyStillRequiresCode(t *testing.T) {
@@ -367,11 +371,182 @@ func TestAuthCommandInteractiveSavesProxyKeyAndVerifiesWithAPIKey(t *testing.T) 
 	}
 }
 
+func TestDashboardCommandOpensMagicLinkAndCachesEmail(t *testing.T) {
+	home := t.TempDir()
+	paths := config.DefaultPaths(home)
+	if err := config.Save(paths, config.Config{APIKey: "dk_dashboard_key"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/install/key" {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"authenticated","email":"dashboard@example.com","magic_link_token":"magic-token"}`))
+	}))
+	defer server.Close()
+	t.Setenv("DISTIL_AUTH_BASE_URL", server.URL)
+
+	origOpen := openBrowserFunc
+	t.Cleanup(func() { openBrowserFunc = origOpen })
+
+	var openedURL string
+	openBrowserFunc = func(targetURL string) error {
+		openedURL = targetURL
+		return nil
+	}
+
+	out, err := runCLI(t, home, "dashboard")
+	if err != nil {
+		t.Fatalf("dashboard command error: %v", err)
+	}
+	if !strings.Contains(out, "Opening dashboard for dashboard@example.com") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+
+	wantURL := buildDashboardURL(server.URL, "magic-token")
+	if openedURL != wantURL {
+		t.Fatalf("unexpected dashboard url: got %q want %q", openedURL, wantURL)
+	}
+
+	cfg, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Email != "dashboard@example.com" {
+		t.Fatalf("expected cached email, got %+v", cfg)
+	}
+}
+
+func TestDashboardCommandPrintsManualURLWhenBrowserOpenFails(t *testing.T) {
+	home := t.TempDir()
+	paths := config.DefaultPaths(home)
+	if err := config.Save(paths, config.Config{APIKey: "dk_dashboard_key"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/install/key" {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"authenticated","email":"dashboard@example.com","magic_link_token":"manual-token"}`))
+	}))
+	defer server.Close()
+	t.Setenv("DISTIL_AUTH_BASE_URL", server.URL)
+
+	origOpen := openBrowserFunc
+	t.Cleanup(func() { openBrowserFunc = origOpen })
+	openBrowserFunc = func(string) error { return errors.New("no browser") }
+
+	out, err := runCLI(t, home, "dashboard")
+	if err != nil {
+		t.Fatalf("dashboard command error: %v", err)
+	}
+	wantURL := buildDashboardURL(server.URL, "manual-token")
+	if !strings.Contains(out, "Could not open a browser automatically for dashboard@example.com.") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if !strings.Contains(out, wantURL) {
+		t.Fatalf("expected fallback url in output: %q", out)
+	}
+}
+
+func TestStatusCommandResolvesAccountEmailWhenMissing(t *testing.T) {
+	home := t.TempDir()
+	paths := config.DefaultPaths(home)
+	if err := config.Save(paths, config.Config{APIKey: "dk_status_key"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/install/key" {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"authenticated","email":"status@example.com"}`))
+	}))
+	defer server.Close()
+	t.Setenv("DISTIL_AUTH_BASE_URL", server.URL)
+
+	origStatusFunc := statusDaemonFunc
+	origNowFunc := statusNowFunc
+	t.Cleanup(func() {
+		statusDaemonFunc = origStatusFunc
+		statusNowFunc = origNowFunc
+	})
+
+	statusDaemonFunc = func(_ config.Paths) (daemon.RuntimeStatus, error) {
+		return daemon.RuntimeStatus{
+			Running:       true,
+			PID:           42,
+			WSState:       "connected",
+			StartedAt:     time.Now().Add(-time.Minute),
+			UptimeSeconds: 60,
+		}, nil
+	}
+	statusNowFunc = time.Now
+
+	out, err := runCLI(t, home, "status", "--json")
+	if err != nil {
+		t.Fatalf("status command error: %v", err)
+	}
+
+	var statusOut statusOutput
+	if err := json.Unmarshal([]byte(out), &statusOut); err != nil {
+		t.Fatalf("decode status output: %v", err)
+	}
+	if statusOut.Email != "status@example.com" {
+		t.Fatalf("unexpected status email: %+v", statusOut)
+	}
+
+	cfg, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Email != "status@example.com" {
+		t.Fatalf("expected cached email, got %+v", cfg)
+	}
+}
+
 func TestAuthRejectsInvalidKey(t *testing.T) {
 	home := t.TempDir()
 	_, err := runCLI(t, home, "auth", "bad")
 	if err == nil {
 		t.Fatal("expected auth error")
+	}
+}
+
+func TestAuthCommandClearsCachedEmailWhenAPIKeyChanges(t *testing.T) {
+	home := t.TempDir()
+	paths := config.DefaultPaths(home)
+	if err := config.Save(paths, config.Config{
+		APIKey: "dk_original_key",
+		Email:  "original@example.com",
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	if _, err := runCLI(t, home, "auth", "dk_replacement_key"); err != nil {
+		t.Fatalf("auth command error: %v", err)
+	}
+
+	cfg, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.APIKey != "dk_replacement_key" {
+		t.Fatalf("expected replacement api key, got %+v", cfg)
+	}
+	if cfg.Email != "" {
+		t.Fatalf("expected cached email cleared after key change, got %+v", cfg)
 	}
 }
 

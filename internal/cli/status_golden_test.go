@@ -53,6 +53,7 @@ func TestStatusOutputGolden(t *testing.T) {
 	statusConfigLoadFunc = func(_ config.Paths) (config.Config, error) {
 		return config.Config{
 			APIKey:            "dpk_test",
+			Email:             "operator@example.com",
 			Server:            "ws://proxy.distil.net/ws",
 			TimeoutMS:         30000,
 			LogLevel:          "info",
@@ -124,6 +125,7 @@ func TestStatusJSONOutput(t *testing.T) {
 	statusConfigLoadFunc = func(_ config.Paths) (config.Config, error) {
 		return config.Config{
 			APIKey:            "dpk_test",
+			Email:             "operator@example.com",
 			Server:            "ws://proxy.distil.net/ws",
 			TimeoutMS:         30000,
 			LogLevel:          "info",
@@ -159,6 +161,9 @@ func TestStatusJSONOutput(t *testing.T) {
 	}
 	if got.UptimeHuman != "1h 52m 25s" {
 		t.Fatalf("unexpected uptime_human: %q", got.UptimeHuman)
+	}
+	if got.Email != "operator@example.com" {
+		t.Fatalf("unexpected email: %q", got.Email)
 	}
 	if got.WebSocket.URL != "ws://proxy.distil.net/ws" {
 		t.Fatalf("unexpected websocket url: %q", got.WebSocket.URL)
