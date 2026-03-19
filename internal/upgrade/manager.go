@@ -136,7 +136,11 @@ func (m *Manager) CheckAndUpgrade(ctx context.Context) (CheckResult, error) {
 	if err != nil {
 		return CheckResult{}, err
 	}
-	if !isNewerVersion(m.cfg.CurrentVersion, release.Version) {
+	needsUpgrade, err := m.needsUpgrade(release)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	if !needsUpgrade {
 		return CheckResult{}, nil
 	}
 
@@ -178,6 +182,23 @@ func (m *Manager) CheckAndUpgrade(ctx context.Context) (CheckResult, error) {
 
 	result.Applied = true
 	return result, nil
+}
+
+func (m *Manager) needsUpgrade(release ReleaseInfo) (bool, error) {
+	if isNewerVersion(m.cfg.CurrentVersion, release.Version) {
+		return true, nil
+	}
+
+	if normalizeVersion(m.cfg.CurrentVersion) != normalizeVersion(release.Version) {
+		return false, nil
+	}
+
+	installedChecksum, err := fileSHA256(m.cfg.BinaryPath)
+	if err != nil {
+		return false, fmt.Errorf("checksum installed binary: %w", err)
+	}
+
+	return !strings.EqualFold(installedChecksum, strings.TrimSpace(release.ChecksumSHA256)), nil
 }
 
 func (m *Manager) fetchLatest(ctx context.Context) (ReleaseInfo, error) {
