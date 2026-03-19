@@ -404,16 +404,18 @@ func TestCheckAndUpgradeAdditionalPaths(t *testing.T) {
 	tempPath := filepath.Join(root, "distil-proxy.new")
 	backupPath := filepath.Join(root, "distil-proxy.bak")
 	statePath := filepath.Join(root, "upgrade.json")
-	if err := os.WriteFile(binaryPath, []byte("old"), 0o755); err != nil {
+	oldBinary := []byte("old")
+	if err := os.WriteFile(binaryPath, oldBinary, 0o755); err != nil {
 		t.Fatalf("write old binary: %v", err)
 	}
+	oldChecksum := sha256.Sum256(oldBinary)
 
 	t.Run("no-new-version", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(ReleaseInfo{
 				Version:        "1.1.0",
 				DownloadURL:    "https://example.com/bin",
-				ChecksumSHA256: strings.Repeat("a", 64),
+				ChecksumSHA256: hex.EncodeToString(oldChecksum[:]),
 			})
 		}))
 		defer ts.Close()
@@ -433,6 +435,61 @@ func TestCheckAndUpgradeAdditionalPaths(t *testing.T) {
 		}
 		if result.Applied || result.AvailableVersion != "" {
 			t.Fatalf("expected no upgrade result, got %+v", result)
+		}
+	})
+
+	t.Run("same-version-checksum-mismatch-applies", func(t *testing.T) {
+		newBinary := []byte("fixed")
+		newChecksum := sha256.Sum256(newBinary)
+
+		var ts *httptest.Server
+		ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/version":
+				_ = json.NewEncoder(w).Encode(ReleaseInfo{
+					Version:        "1.1.0",
+					DownloadURL:    ts.URL + "/binary",
+					ChecksumSHA256: hex.EncodeToString(newChecksum[:]),
+				})
+			case "/binary":
+				_, _ = w.Write(newBinary)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer ts.Close()
+
+		m := NewManager(ManagerConfig{
+			Enabled:        true,
+			CurrentVersion: "1.1.0",
+			BinaryPath:     binaryPath,
+			TempBinaryPath: tempPath,
+			BackupPath:     backupPath,
+			StatePath:      statePath,
+			EndpointURL:    ts.URL + "/version",
+		})
+		result, err := m.CheckAndUpgrade(context.Background())
+		if err != nil {
+			t.Fatalf("check and upgrade same-version recovery: %v", err)
+		}
+		if !result.Applied || result.AvailableVersion != "1.1.0" {
+			t.Fatalf("expected same-version recovery result, got %+v", result)
+		}
+
+		installed, err := os.ReadFile(binaryPath)
+		if err != nil {
+			t.Fatalf("read installed binary: %v", err)
+		}
+		if string(installed) != string(newBinary) {
+			t.Fatalf("unexpected installed binary after recovery: %q", string(installed))
+		}
+
+		backup, err := os.ReadFile(backupPath)
+		if err != nil {
+			t.Fatalf("read backup binary: %v", err)
+		}
+		if string(backup) != string(oldBinary) {
+			t.Fatalf("unexpected backup binary after recovery: %q", string(backup))
 		}
 	})
 
@@ -461,6 +518,48 @@ func TestCheckAndUpgradeAdditionalPaths(t *testing.T) {
 		}
 		if result.AvailableVersion != "1.2.0" || result.Applied {
 			t.Fatalf("expected available-only result, got %+v", result)
+		}
+	})
+
+	t.Run("same-version-checksum-mismatch-disabled-reports-availability", func(t *testing.T) {
+		staleBinary := []byte("stale")
+		staleChecksum := sha256.Sum256(staleBinary)
+		if err := os.WriteFile(binaryPath, staleBinary, 0o755); err != nil {
+			t.Fatalf("write stale binary: %v", err)
+		}
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(ReleaseInfo{
+				Version:        "1.1.0",
+				DownloadURL:    "https://example.com/bin",
+				ChecksumSHA256: strings.Repeat("b", 64),
+			})
+		}))
+		defer ts.Close()
+
+		m := NewManager(ManagerConfig{
+			Enabled:        false,
+			CurrentVersion: "1.1.0",
+			BinaryPath:     binaryPath,
+			TempBinaryPath: tempPath,
+			BackupPath:     backupPath,
+			StatePath:      statePath,
+			EndpointURL:    ts.URL,
+		})
+		result, err := m.CheckAndUpgrade(context.Background())
+		if err != nil {
+			t.Fatalf("check and upgrade same-version disabled: %v", err)
+		}
+		if result.AvailableVersion != "1.1.0" || result.Applied {
+			t.Fatalf("expected same-version availability result, got %+v", result)
+		}
+
+		installedChecksum, err := fileSHA256(binaryPath)
+		if err != nil {
+			t.Fatalf("checksum stale binary: %v", err)
+		}
+		if installedChecksum != hex.EncodeToString(staleChecksum[:]) {
+			t.Fatalf("unexpected stale checksum after disabled check: %q", installedChecksum)
 		}
 	})
 
